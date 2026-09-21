@@ -1,6 +1,8 @@
 import { clampInt, escapeHTML, uniqueNonEmpty } from './utils.js';
 
 export function createProviderController({ state, el, api }) {
+  const discoveryVersions = new Map();
+  let testVersion = 0;
   function getProvider(id) {
     return state.providers.find(provider => provider.id === id) || null;
   }
@@ -157,14 +159,17 @@ export function createProviderController({ state, el, api }) {
   }
 
   async function discoverModels(providerID = state.activeProvider, options = {}) {
+    const version = (discoveryVersions.get(providerID) || 0) + 1;
+    discoveryVersions.set(providerID, version);
     const updateTranslation = options.updateTranslation ?? providerID === (state.translationProvider || state.activeProvider);
     const quiet = options.quiet ?? false;
     const provider = getProvider(providerID);
     try {
       const res = await api(`/api/models?provider=${encodeURIComponent(providerID)}`, { silent: quiet });
       const models = res.models || [];
+      if (discoveryVersions.get(providerID) !== version) return models;
       if (provider) provider.liveFreeModels = res.freeModels || [];
-      if (updateTranslation) {
+      if (updateTranslation && state.translationProvider === providerID) {
         state.availableModels = models;
         state.translationProvider = providerID;
         renderTranslationProviderOptions(providerID);
@@ -176,9 +181,10 @@ export function createProviderController({ state, el, api }) {
       }
       return models;
     } catch (err) {
+      if (discoveryVersions.get(providerID) !== version) return [];
       if (!quiet) console.warn('Model discovery warning:', err);
       if (provider) provider.liveFreeModels = [];
-      if (updateTranslation) {
+      if (updateTranslation && state.translationProvider === providerID) {
         state.availableModels = [];
         state.translationProvider = providerID;
         renderTranslationProviderOptions(providerID);
@@ -211,7 +217,9 @@ export function createProviderController({ state, el, api }) {
       el.cfgTemp.value = cfg.temperature ?? 0.3;
       el.cfgParallel.value = cfg.parallel ?? 2;
       el.cfgMaxTokens.value = cfg.maxTokens ?? 8192;
-      void discoverModels(state.translationProvider, { updateTranslation: true, quiet: true });
+      // Reading a local book should not make an unsolicited cloud request.
+      // Saved models and provider hints work offline; discovery stays explicit.
+      populateTranslationModels(state.translationProvider, []);
     } catch (err) {
       console.warn('Config load warning:', err);
       populateTranslationModels();
@@ -261,6 +269,7 @@ export function createProviderController({ state, el, api }) {
   }
 
   async function testCurrentProvider() {
+    const version = ++testVersion;
     const provider = getProvider(state.settingsProvider);
     if (!provider) return [];
     el.providerTestResult.className = 'provider-test-result is-loading';
@@ -272,18 +281,20 @@ export function createProviderController({ state, el, api }) {
         body: JSON.stringify(currentSettingsPayload({ includeTuning: false })),
       });
       const models = res.models || [];
+      if (version !== testVersion || state.settingsProvider !== provider.id) return models;
       provider.liveFreeModels = res.freeModels || [];
       renderSettingsModelOptions(provider, models);
       renderFreeModelHints(provider);
       el.providerTestResult.className = 'provider-test-result is-success';
-      el.providerTestResult.textContent = `เชื่อมต่อสำเร็จ • พบ ${models.length} โมเดล`;
+      el.providerTestResult.textContent = `อ่านรายชื่อสำเร็จ • ${models.length} โมเดล • ยังไม่ได้ทดสอบสร้างคำแปล`;
       return models;
     } catch (err) {
+      if (version !== testVersion || state.settingsProvider !== provider.id) return [];
       el.providerTestResult.className = 'provider-test-result is-error';
       el.providerTestResult.textContent = `เชื่อมต่อไม่สำเร็จ: ${err.message}`;
       return [];
     } finally {
-      el.btnTestProvider.disabled = false;
+      if (version === testVersion) el.btnTestProvider.disabled = false;
     }
   }
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ const backupKeep = 7
 const backupStaleAfter = 24 * time.Hour
 
 var backupMu sync.Mutex
+var backupNamePattern = regexp.MustCompile(`^novelclaw-backup-\d{8}-\d{6}-[0-9a-f]{4}\.zip$`)
 
 type backupInfo struct {
 	Name    string    `json:"name"`
@@ -60,16 +62,32 @@ func CreateBackup(cfg *config.AppConfig) (backupInfo, error) {
 	}
 
 	zw := zip.NewWriter(out)
+	absoluteBackupDir, err := filepath.Abs(dir)
+	if err != nil {
+		out.Close()
+		os.Remove(tmpDest)
+		return backupInfo{}, err
+	}
 	err = filepath.WalkDir(cfg.DataDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
+			absolutePath, err := filepath.Abs(path)
+			if err != nil {
+				return err
+			}
+			if absolutePath == absoluteBackupDir {
+				return filepath.SkipDir
+			}
 			// Cache and restart-queue files are reproducible/transient. Excluding
 			// them keeps backups small even when TTS audio grows into gigabytes.
 			if d.Name() == ".cache" || d.Name() == ".jobs" {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		if strings.HasSuffix(d.Name(), ".tmp") {
@@ -133,7 +151,7 @@ func ListBackups(cfg *config.AppConfig) []backupInfo {
 	}
 	var list []backupInfo
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".zip") {
+		if e.IsDir() || !backupNamePattern.MatchString(e.Name()) {
 			continue
 		}
 		info, err := e.Info()
@@ -161,7 +179,7 @@ func pruneBackups(dir string) {
 	}
 	var list []archive
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".zip") {
+		if e.IsDir() || !backupNamePattern.MatchString(e.Name()) {
 			continue
 		}
 		info, err := e.Info()

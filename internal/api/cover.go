@@ -45,6 +45,8 @@ func (h *APIHandler) UploadNovelCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	coverPath := filepath.Join(h.store.DataDir, slug, "cover"+ext)
+	h.coverMu.Lock()
+	defer h.coverMu.Unlock()
 	tmp := coverPath + ".upload"
 	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -58,12 +60,14 @@ func (h *APIHandler) UploadNovelCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	written := int64(n)
-	if _, err := io.Copy(file, io.LimitReader(r.Body, maxCoverUpload)); err != nil {
+	copied, err := io.Copy(file, io.LimitReader(r.Body, maxCoverUpload-written+1))
+	if err != nil {
 		file.Close()
 		os.Remove(tmp)
 		WriteError(w, http.StatusInternalServerError, "cannot write cover")
 		return
 	}
+	written += copied
 	if err := file.Close(); err != nil {
 		os.Remove(tmp)
 		WriteError(w, http.StatusInternalServerError, "cannot write cover")
@@ -74,17 +78,16 @@ func (h *APIHandler) UploadNovelCover(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusRequestEntityTooLarge, "cover image too large (max 4 MB)")
 		return
 	}
-	// Remove other cover variants so a stale cover.png cannot shadow the
-	// freshly uploaded cover.jpg in GetNovelCover's candidate order.
-	for candidateExt := range coverMIMEs {
-		if candidateExt != ext {
-			_ = os.Remove(filepath.Join(h.store.DataDir, slug, "cover"+candidateExt))
-		}
-	}
 	if err := os.Rename(tmp, coverPath); err != nil {
 		os.Remove(tmp)
 		WriteError(w, http.StatusInternalServerError, "cannot store cover")
 		return
+	}
+	// Remove old extensions only after the new cover is safely installed.
+	for _, candidateExt := range []string{".webp", ".jpg", ".jpeg", ".png"} {
+		if candidateExt != ext {
+			_ = os.Remove(filepath.Join(h.store.DataDir, slug, "cover"+candidateExt))
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -102,13 +105,18 @@ func (h *APIHandler) GetNovelCover(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, candidate := range candidates {
 		path := filepath.Join(h.store.DataDir, slug, candidate.name)
-		data, err := os.ReadFile(path)
+		file, err := os.Open(path)
 		if err == nil {
+			defer file.Close()
+			info, err := file.Stat()
+			if err != nil {
+				WriteError(w, http.StatusInternalServerError, "failed to read novel cover")
+				return
+			}
 			w.Header().Set("Content-Type", candidate.mime)
 			w.Header().Set("Cache-Control", "private, max-age=3600")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(data)
+			http.ServeContent(w, r, candidate.name, info.ModTime(), file)
 			return
 		}
 		if !os.IsNotExist(err) {

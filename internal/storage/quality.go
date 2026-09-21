@@ -47,14 +47,15 @@ func (s *Store) GetQualityReport(slug string, chapterNo int) (*model.Translation
 
 func (s *Store) ListQualityReports(slug string) ([]model.TranslationQualityReport, error) {
 	slug = pathSafeSlug(slug)
-	if cached, ok := s.cachedQualityReports(slug); ok {
+	cached, ok, generation := s.cachedQualityReports(slug)
+	if ok {
 		return cached, nil
 	}
 	dir := filepath.Join(s.DataDir, slug, "qa")
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
 		empty := []model.TranslationQualityReport{}
-		s.setQualityReportCache(slug, empty)
+		s.setQualityReportCache(slug, empty, generation)
 		return empty, nil
 	}
 	if err != nil {
@@ -77,6 +78,6 @@ func (s *Store) ListQualityReports(slug string) ([]model.TranslationQualityRepor
 		reports = append(reports, report)
 	}
 	sort.Slice(reports, func(i, j int) bool { return reports[i].ChapterNo < reports[j].ChapterNo })
-	s.setQualityReportCache(slug, reports)
+	s.setQualityReportCache(slug, reports, generation)
 	return reports, nil
 }

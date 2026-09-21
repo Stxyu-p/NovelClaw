@@ -3,15 +3,30 @@ import { escapeHTML } from './utils.js';
 export function createGlossaryController({
   state, el, api, showToast, openModal, closeModal,
 }) {
+  let session = 0;
+  let loaded = false;
+  let editVersion = 0;
+  const isCurrent = (id, slug) => id === session && state.currentSlug === slug && !el.modalGlossary.classList.contains('hidden');
   async function openGlossary() {
     if (!state.currentSlug) return;
+    const id = ++session, slug = state.currentSlug;
+    loaded = false;
+    state.glossaryTerms = [];
+    el.btnSaveGlossary.disabled = true;
     openModal(el.modalGlossary);
     el.discStatus.textContent = '';
+    el.glossaryQaResults.innerHTML = '';
+    el.glossaryTbody.innerHTML = '<tr><td colspan="4" class="table-empty">กำลังโหลดคำศัพท์...</td></tr>';
     try {
-      const res = await api(`/api/novels/${state.currentSlug}/glossary`);
+      const res = await api(`/api/novels/${encodeURIComponent(slug)}/glossary`);
+      if (!isCurrent(id, slug)) return;
       state.glossaryTerms = res.terms || [];
+      loaded = true;
+      el.btnSaveGlossary.disabled = false;
       renderGlossaryTable();
     } catch (err) {
+      if (!isCurrent(id, slug)) return;
+      el.glossaryTbody.innerHTML = '<tr><td colspan="4" class="table-empty">โหลดคำศัพท์ไม่สำเร็จ กรุณาปิดแล้วเปิดใหม่</td></tr>';
       console.error('load glossary failed', err);
     }
   }
@@ -47,10 +62,13 @@ export function createGlossaryController({
     const field = input.dataset.field;
     if (!Number.isInteger(index) || index < 0 || index >= state.glossaryTerms.length || !field) return;
     state.glossaryTerms[index][field] = input.value.trim();
+    editVersion++;
   }
 
   async function discoverGlossary() {
-    if (!state.currentSlug) return;
+    if (!state.currentSlug || !loaded || el.btnRunDiscovery.disabled) return;
+    const id = session, slug = state.currentSlug, edits = editVersion;
+    el.btnRunDiscovery.disabled = true;
     const start = Number.parseInt(el.discStart.value, 10) || 1;
     const end = Number.parseInt(el.discEnd.value, 10) || start;
     const model = el.transModelSelect.value || state.defaultModel;
@@ -60,6 +78,11 @@ export function createGlossaryController({
         method: 'POST',
         body: JSON.stringify({ novelSlug: state.currentSlug, startChapter: start, endChapter: end, model }),
       });
+      if (!isCurrent(id, slug)) return;
+      if (edits !== editVersion) {
+        el.discStatus.textContent = 'มีการแก้ไขศัพท์ระหว่างสแกน จึงเก็บการแก้ไขของคุณไว้ กรุณาบันทึกก่อนสแกนใหม่';
+        return;
+      }
       const found = res.discovered?.length || 0;
       const added = res.added?.length || 0;
       const skipped = res.skippedBuiltin || 0;
@@ -71,33 +94,43 @@ export function createGlossaryController({
         : `✅ สแกนสำเร็จแต่ไม่มีศัพท์ใหม่ (โมเดลเจอ ${found} คำ — ซ้ำในตาราง ${dupes}, builtin ล็อกอยู่แล้ว ${skipped})`;
       showToast(added ? `เพิ่มศัพท์ใหม่ ${added} คำ (ยังไม่บันทึก)` : `ไม่มีศัพท์ใหม่ — ที่เจอเป็นศัพท์ซ้ำ/builtin ทั้งหมด`, 'info');
     } catch (err) {
+      if (!isCurrent(id, slug)) return;
       el.discStatus.textContent = '❌ สแกนล้มเหลว';
       showToast(`การสแกนศัพท์ล้มเหลว: ${err.message}`, 'error');
+    } finally {
+      el.btnRunDiscovery.disabled = false;
     }
   }
 
   function addManualTerm(event) {
     event.preventDefault();
+    if (!loaded) return;
     const term = el.termOrig?.value.trim() || '';
     const target = el.termTarget?.value.trim() || '';
     const category = el.termCategory?.value || '';
     if (!term || !target) return;
     state.glossaryTerms.push({ term, target, category });
+    editVersion++;
     renderGlossaryTable();
     el.termOrig.value = '';
     el.termTarget.value = '';
   }
   async function saveGlossary() {
-    if (!state.currentSlug) return;
+    if (!state.currentSlug || !loaded || el.btnSaveGlossary.disabled) return;
+    const id = session, slug = state.currentSlug;
+    el.btnSaveGlossary.disabled = true;
     try {
       await api(`/api/novels/${state.currentSlug}/glossary`, {
         method: 'POST',
         body: JSON.stringify({ novelSlug: state.currentSlug, terms: state.glossaryTerms }),
       });
+      if (!isCurrent(id, slug)) return;
       showToast('บันทึก Glossary เรียบร้อยแล้ว', 'success');
       closeModal(el.modalGlossary);
     } catch (err) {
       console.error('save glossary failed', err);
+    } finally {
+      if (id === session) el.btnSaveGlossary.disabled = !loaded;
     }
   }
 
@@ -126,12 +159,14 @@ export function createGlossaryController({
 
   async function runGlossaryQA() {
     if (!state.currentSlug) return;
+    const id = session, slug = state.currentSlug;
     const start = Number.parseInt(el.qaStart?.value, 10) || 1;
     const end = Number.parseInt(el.qaEnd?.value, 10) || start;
     el.btnGlossaryCheck.disabled = true;
     el.btnGlossaryCheck.textContent = '⏳ กำลังตรวจ...';
     try {
       const res = await api(`/api/novels/${state.currentSlug}/glossary/check?start=${start}&end=${end}`);
+      if (!isCurrent(id, slug)) return;
       renderGlossaryQA(res);
       el.glossaryQaResults.style.display = 'block';
     } catch (err) {
@@ -170,6 +205,7 @@ export function createGlossaryController({
       const index = Number.parseInt(button.dataset.idx, 10);
       if (Number.isInteger(index) && index >= 0) {
         state.glossaryTerms.splice(index, 1);
+        editVersion++;
         renderGlossaryTable();
       }
     });

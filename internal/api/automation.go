@@ -111,33 +111,13 @@ func (h *APIHandler) mergeDiscoveredGlossary(slug string, discovered []model.Glo
 	if len(discovered) == 0 {
 		return 0, nil
 	}
-	glossary, err := h.store.GetGlossary(slug)
-	if err != nil {
-		return 0, err
-	}
-	termMap := make(map[string]bool, len(glossary.Terms))
-	for _, t := range glossary.Terms {
-		termMap[t.Term] = true
-	}
-	added := 0
-	for _, d := range discovered {
-		if d.Term == "" || d.Target == "" || termMap[d.Term] {
-			continue
+	filtered := make([]model.GlossaryItem, 0, len(discovered))
+	for _, term := range discovered {
+		if _, builtin := translator.BuiltinNovelGlossary[term.Term]; !builtin {
+			filtered = append(filtered, term)
 		}
-		// Terms already covered by the builtin glossary must not be re-added:
-		// a discovered variant would shadow the locked builtin value during
-		// sanitization (custom map runs before builtin replacements).
-		if _, builtin := translator.BuiltinNovelGlossary[d.Term]; builtin {
-			continue
-		}
-		glossary.Terms = append(glossary.Terms, d)
-		termMap[d.Term] = true
-		added++
 	}
-	if added == 0 {
-		return 0, nil
-	}
-	return added, h.store.SaveGlossary(glossary)
+	return h.store.MergeGlossaryTerms(slug, filtered)
 }
 
 // AutoGenerateMemory summarizes the most recent translated chapters into the
@@ -218,8 +198,12 @@ func (h *APIHandler) AutoGenerateMemory(slug string) {
 		fresh := existing == nil || len(selected) > 0
 		merged := translator.MergeNovelMemory(existing, candidate, fresh)
 		merged.NovelSlug = slug
-		if err := h.store.SaveNovelMemory(merged); err != nil {
+		saved, err := h.store.SaveGeneratedMemory(merged, existing.UpdatedAt)
+		if err != nil {
 			log.Printf("auto memory generation: save %s: %v", slug, err)
+			return
+		}
+		if !saved {
 			return
 		}
 		if h.sse != nil {

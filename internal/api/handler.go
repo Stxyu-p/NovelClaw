@@ -33,6 +33,7 @@ type APIHandler struct {
 	sse         *SSEBroker
 	importDelay time.Duration
 	jobsMu      sync.Mutex
+	coverMu     sync.Mutex
 	activeJobs  map[string]*model.TranslationProgress
 	cancels     map[string]context.CancelFunc
 }
@@ -423,6 +424,10 @@ func (h *APIHandler) SaveBookmark(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	bm.NovelSlug = slug
+	if bm.ChapterNo < 1 || bm.ScrollPercentage < 0 || bm.ScrollPercentage > 100 {
+		WriteError(w, http.StatusBadRequest, "invalid bookmark position")
+		return
+	}
 	// Opening a chapter posts scrollPercentage 0; don't let it wipe the saved
 	// position when the same chapter is re-opened (refresh / TTS hand-off).
 	if bm.ScrollPercentage <= 0 {
@@ -456,9 +461,10 @@ func (h *APIHandler) CancelJob(w http.ResponseWriter, r *http.Request) {
 	h.jobsMu.Unlock()
 
 	h.sse.Broadcast(model.TranslationProgress{
-		JobID:   jobID,
-		Status:  "cancelled",
-		Message: "ยกเลิกงานเรียบร้อยแล้ว",
+		JobID:     jobID,
+		NovelSlug: slug,
+		Status:    "cancelled",
+		Message:   "ยกเลิกงานเรียบร้อยแล้ว",
 	})
 
 	WriteJSON(w, http.StatusOK, map[string]interface{}{

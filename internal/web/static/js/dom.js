@@ -1,5 +1,6 @@
 export function bindDOM() {
   return {
+    connectionStatus: document.getElementById('connection-status'),
     viewLibrary: document.getElementById('view-library'),
     viewDetail: document.getElementById('view-detail'),
     viewReader: document.getElementById('view-reader'),

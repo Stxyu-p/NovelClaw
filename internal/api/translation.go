@@ -61,8 +61,21 @@ func (h *APIHandler) Translate(w http.ResponseWriter, r *http.Request) {
 	if req.StartChapter <= 0 {
 		req.StartChapter = 1
 	}
-	if req.EndChapter <= 0 || req.EndChapter < req.StartChapter {
+	if req.EndChapter <= 0 {
 		req.EndChapter = req.StartChapter
+	}
+	if req.EndChapter < req.StartChapter {
+		WriteError(w, http.StatusBadRequest, "endChapter must not precede startChapter")
+		return
+	}
+	chapters, err := h.store.ListChapters(req.NovelSlug)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(chapters) == 0 || req.EndChapter > chapters[len(chapters)-1].ChapterNo {
+		WriteError(w, http.StatusBadRequest, "translation range exceeds the available catalog")
+		return
 	}
 
 	jobID := fmt.Sprintf("job_%d", time.Now().UnixNano())
@@ -77,7 +90,7 @@ func (h *APIHandler) Translate(w http.ResponseWriter, r *http.Request) {
 	h.activeJobs[jobID] = &model.TranslationProgress{
 		JobID:          jobID,
 		NovelSlug:      req.NovelSlug,
-		TotalChapters:  req.EndChapter,
+		TotalChapters:  req.EndChapter - req.StartChapter + 1,
 		CurrentChapter: req.StartChapter,
 		Status:         "running",
 		Percentage:     0,
@@ -121,7 +134,7 @@ func (h *APIHandler) runTranslationJobWithProvider(ctx context.Context, jobID st
 			return false
 		}
 		message := fmt.Sprintf("เตรียมบริบทการแปลไม่สำเร็จ (%s): %v", label, err)
-		h.sse.Broadcast(model.TranslationProgress{
+		h.broadcastProgress(model.TranslationProgress{
 			JobID: jobID, NovelSlug: req.NovelSlug, Status: "error",
 			Message: message, Percentage: 100, ErrorDetails: err.Error(),
 		})
@@ -153,6 +166,17 @@ func (h *APIHandler) runTranslationJobWithProvider(ctx context.Context, jobID st
 	if failContext("สารบัญตอน", err) {
 		return
 	}
+	var selected []int
+	for _, chapter := range chapterList {
+		if chapter.ChapterNo >= req.StartChapter && chapter.ChapterNo <= req.EndChapter && (chapter.HasSource || chapter.HasTranslated) {
+			selected = append(selected, chapter.ChapterNo)
+		}
+	}
+	total = len(selected)
+	if total == 0 {
+		failContext("สารบัญตอน", fmt.Errorf("ไม่พบตอนที่มีเนื้อหาในช่วงที่เลือก"))
+		return
+	}
 	memoryContext := translator.BuildMemoryContext(memory, glossary)
 
 	// Model fallback chain: primary model first, then any fallbacks the UI
@@ -173,6 +197,9 @@ func (h *APIHandler) runTranslationJobWithProvider(ctx context.Context, jobID st
 	// a wave fall back to source-tail context because their predecessor may
 	// still be translating.
 	workers := h.cfg.GetParallel()
+	if workers < 1 {
+		workers = 1
+	}
 	if workers > 8 { // ponytail: soft cap against config typos; raise if gateway handles more
 		workers = 8
 	}
@@ -181,7 +208,7 @@ func (h *APIHandler) runTranslationJobWithProvider(ctx context.Context, jobID st
 	}
 	jc := &jobCounters{}
 
-	for waveStart := req.StartChapter; waveStart <= req.EndChapter; waveStart += workers {
+	for waveStart := 0; waveStart < total; waveStart += workers {
 		select {
 		case <-ctx.Done():
 			log.Printf("Translation job %s cancelled by user\n", jobID)
@@ -189,22 +216,25 @@ func (h *APIHandler) runTranslationJobWithProvider(ctx context.Context, jobID st
 		default:
 		}
 
-		waveEnd := waveStart + workers - 1
-		if waveEnd > req.EndChapter {
-			waveEnd = req.EndChapter
+		waveEnd := waveStart + workers
+		if waveEnd > total {
+			waveEnd = total
 		}
-		waveSize := waveEnd - waveStart + 1
+		waveSize := waveEnd - waveStart
 		done := make(chan struct{}, waveSize)
 
-		for chNo := waveStart; chNo <= waveEnd; chNo++ {
-			go func(chNo int) {
+		for index := waveStart; index < waveEnd; index++ {
+			go func(index int) {
 				defer func() { done <- struct{}{} }()
-				h.translateOneChapter(ctx, jobID, req, provider, chNo, total, glossary, styleRules, memoryContext,
+				h.translateOneChapter(ctx, jobID, req, provider, selected[index], total, index+1, glossary, styleRules, memoryContext,
 					genre, modelChain, chapterList, jc)
-			}(chNo)
+			}(index)
 		}
 		for i := 0; i < waveSize; i++ {
 			<-done
+		}
+		if ctx.Err() != nil {
+			return
 		}
 
 		successCount += int(jc.success.Swap(0))
@@ -213,7 +243,7 @@ func (h *APIHandler) runTranslationJobWithProvider(ctx context.Context, jobID st
 		}
 	}
 
-	if successCount > 0 {
+	if jc.written.Load() > 0 {
 		// New translations landed — let the AI refresh story memory on its own,
 		// and bootstrap glossary discovery when the novel has no terms yet
 		// (e.g. novels imported before auto-discovery existed).
@@ -238,7 +268,7 @@ func (h *APIHandler) runTranslationJobWithProvider(ctx context.Context, jobID st
 		finalMsg = fmt.Sprintf("การแปลเสร็จบางส่วน (%d/%d ตอน)", successCount, total)
 	}
 
-	h.sse.Broadcast(model.TranslationProgress{
+	h.broadcastProgress(model.TranslationProgress{
 		JobID:        jobID,
 		NovelSlug:    req.NovelSlug,
 		Status:       finalStatus,
@@ -251,6 +281,7 @@ func (h *APIHandler) runTranslationJobWithProvider(ctx context.Context, jobID st
 // jobCounters accumulates per-chapter results from parallel workers.
 type jobCounters struct {
 	success atomic.Int64
+	written atomic.Int64
 	errMu   sync.Mutex
 	lastErr string
 }
@@ -275,17 +306,16 @@ func (jc *jobCounters) takeError() string {
 // translateOneChapter translates a single chapter; safe to run concurrently
 // for different chapter numbers within one job.
 func (h *APIHandler) translateOneChapter(ctx context.Context, jobID string, req model.TranslateRequest, provider config.ActiveProvider,
-	chNo, total int, glossary *model.NovelGlossary, styleRules, memoryContext, genre string,
+	chNo, total, currentIdx int, glossary *model.NovelGlossary, styleRules, memoryContext, genre string,
 	modelChain []string, chapterList []model.ChapterMeta, jc *jobCounters) {
 
-	currentIdx := chNo - req.StartChapter + 1
 	pct := int((float64(currentIdx) / float64(total)) * 100)
 
-	h.sse.Broadcast(model.TranslationProgress{
+	h.broadcastProgress(model.TranslationProgress{
 		JobID:          jobID,
 		NovelSlug:      req.NovelSlug,
 		CurrentChapter: chNo,
-		TotalChapters:  req.EndChapter,
+		TotalChapters:  total,
 		Status:         "running",
 		Message:        fmt.Sprintf("กำลังแปลตอนที่ %d... (%d/%d)", chNo, currentIdx, total),
 		Percentage:     pct,
@@ -300,20 +330,19 @@ func (h *APIHandler) translateOneChapter(ctx context.Context, jobID string, req 
 		message := fmt.Sprintf("อ่านตอนที่ %d ไม่สำเร็จ: %v", chNo, err)
 		log.Printf("%s\n", message)
 		jc.setError(message)
-		h.sse.Broadcast(model.TranslationProgress{
+		h.broadcastProgress(model.TranslationProgress{
 			JobID: jobID, NovelSlug: req.NovelSlug, CurrentChapter: chNo,
 			Status: "error", Message: message, ErrorDetails: err.Error(),
 		})
 		return
 	}
-	if len(content.SourceText) == 0 {
-		log.Printf("Chapter %d has no source text, skipping\n", chNo)
-		return
-	}
-
 	if len(content.TranslatedText) > 0 && !req.Force {
 		log.Printf("Chapter %d already translated, skipping\n", chNo)
 		jc.success.Add(1)
+		return
+	}
+	if len(content.SourceText) == 0 {
+		log.Printf("Chapter %d has no source text, skipping\n", chNo)
 		return
 	}
 
@@ -363,7 +392,7 @@ func (h *APIHandler) translateOneChapter(ctx context.Context, jobID string, req 
 			if err != nil {
 				log.Printf("Translation error on chapter %d (chunk %d): %v\n", chNo, chunkIdx, err)
 				jc.setError(err.Error())
-				h.sse.Broadcast(model.TranslationProgress{
+				h.broadcastProgress(model.TranslationProgress{
 					JobID:          jobID,
 					NovelSlug:      req.NovelSlug,
 					CurrentChapter: chNo,
@@ -382,6 +411,10 @@ func (h *APIHandler) translateOneChapter(ctx context.Context, jobID string, req 
 			retriedChunks++
 			if attempt >= 3 {
 				log.Printf("chapter %d (chunk %d): model kept returning %d/%d paragraphs after %d attempts\n", chNo, chunkIdx, len(tParagraphs), len(chunk.Paragraphs), attempt)
+				message := fmt.Sprintf("ตอนที่ %d: โมเดลส่ง %d/%d ย่อหน้าหลังลอง 3 ครั้ง จึงเก็บคำแปลเดิมไว้", chNo, len(tParagraphs), len(chunk.Paragraphs))
+				jc.setError(message)
+				h.broadcastProgress(model.TranslationProgress{JobID: jobID, NovelSlug: req.NovelSlug, CurrentChapter: chNo, Status: "error", Message: message, ErrorDetails: message})
+				chapterFailed = true
 				break
 			}
 			log.Printf("chapter %d (chunk %d): model returned %d/%d paragraphs, retrying (attempt %d/3)\n", chNo, chunkIdx, len(tParagraphs), len(chunk.Paragraphs), attempt+1)
@@ -416,6 +449,12 @@ func (h *APIHandler) translateOneChapter(ctx context.Context, jobID string, req 
 	finalTransTitle = cleanTitle
 	fullTranslatedParagraphs = cleanParagraphs
 	sanitizeDiag := translator.MergeSanitizationDiagnostics(titleDiag, paragraphDiag)
+	if sanitizeDiag.RemovedUnknownHanzi > 0 {
+		message := fmt.Sprintf("ตอนที่ %d: คำแปลยังมีคำที่แปลไม่ครบ จึงไม่บันทึกทับฉบับเดิม — เพิ่มคำศัพท์หรือเลือกโมเดลอื่นแล้วลองอีกครั้ง", chNo)
+		jc.setError(message)
+		h.broadcastProgress(model.TranslationProgress{JobID: jobID, NovelSlug: req.NovelSlug, CurrentChapter: chNo, Status: "error", Message: message, ErrorDetails: message})
+		return
+	}
 
 	// Consistency check: glossary terms present in the source should have
 	// their expected target somewhere in the translation. Mismatches are
@@ -441,9 +480,6 @@ func (h *APIHandler) translateOneChapter(ctx context.Context, jobID string, req 
 
 	qaReport := translator.EvaluateTranslationQuality(req.NovelSlug, chNo, content.SourceText, fullTranslatedParagraphs, glossary)
 	translator.ApplySanitizationDiagnostics(&qaReport, sanitizeDiag)
-	if sanitizeDiag.RemovedUnknownHanzi > 0 {
-		warnings = append(warnings, fmt.Sprintf("QA: ระบบต้องตัดอักษรจีนที่ไม่รู้จักออก %d ตัว — แนะนำให้ตรวจหรือรีแปลตอนนี้", sanitizeDiag.RemovedUnknownHanzi))
-	}
 	for _, issue := range qaReport.Issues {
 		if issue.Severity == "error" {
 			warnings = append(warnings, "QA: "+issue.Message)
@@ -454,6 +490,9 @@ func (h *APIHandler) translateOneChapter(ctx context.Context, jobID string, req 
 		warnings = append(warnings, fmt.Sprintf("ระบบส่งใหม่อัตโนมัติ %d ครั้งเพราะโมเดลส่งย่อหน้าไม่ครบ — ผลลัพธ์สุดท้ายครบถ้วน", retriedChunks))
 	}
 
+	if ctx.Err() != nil {
+		return
+	}
 	if err := h.store.SaveChapter(req.NovelSlug, chNo, content.SourceTitle, finalTransTitle, nil, fullTranslatedParagraphs); err != nil {
 		log.Printf("SaveChapter %d failed: %v\n", chNo, err)
 		jc.setError(err.Error())
@@ -464,9 +503,11 @@ func (h *APIHandler) translateOneChapter(ctx context.Context, jobID string, req 
 		warnings = append(warnings, fmt.Sprintf("QA: บันทึกรายงานคุณภาพไม่สำเร็จ (%v) — คำแปลถูกบันทึกแล้ว", err))
 	}
 	jc.success.Add(1)
+	jc.written.Add(1)
 
 	h.sse.Broadcast(map[string]interface{}{
 		"type":      "chapter_translated",
+		"jobId":     jobID,
 		"novelSlug": req.NovelSlug,
 		"chapterNo": chNo,
 		"title":     finalTransTitle,

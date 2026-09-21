@@ -90,6 +90,9 @@ export function createProviderEvents({
       updateTranslationProviderHint();
       showToast(`ใช้งาน ${getProvider(cfg.provider)?.name || cfg.provider} แล้ว`, 'success');
       closeModal(el.modalSettings);
+    } catch (err) {
+      el.providerTestResult.className = 'provider-test-result is-error';
+      el.providerTestResult.textContent = `บันทึกการตั้งค่าไม่สำเร็จ: ${err.message}`;
     } finally {
       el.btnSaveSettings.disabled = false;
       el.btnSaveSettings.textContent = '✓ บันทึกและใช้งาน';
@@ -132,7 +135,7 @@ export function createProviderEvents({
         item.classList.toggle('is-active', active);
         item.setAttribute('aria-pressed', active ? 'true' : 'false');
       });
-      showToast(`????? ${model}`, 'info');
+      showToast(`เลือก ${model} แล้ว`, 'info');
     });
     el.btnClearApiKey?.addEventListener('click', () => {
       state.clearProviderKey = true;

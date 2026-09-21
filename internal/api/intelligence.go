@@ -113,6 +113,9 @@ func (h *APIHandler) RebuildQualityReports(w http.ResponseWriter, r *http.Reques
 	}
 	reports := make([]model.TranslationQualityReport, 0, len(chapters))
 	for _, meta := range chapters {
+		if r.Context().Err() != nil {
+			return
+		}
 		if meta.ChapterNo < start || (end > 0 && meta.ChapterNo > end) || !meta.HasTranslated {
 			continue
 		}

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,10 +15,13 @@ import (
 	"novelclaw/internal/translator"
 )
 
+var ErrIncompleteTranslation = errors.New("คำแปลยังมีคำที่แปลไม่ครบ เพิ่มคำศัพท์หรือแปลใหม่ก่อนบันทึก")
+
 // ListChapters returns summary metadata for all chapters in a novel
 func (s *Store) ListChapters(slug string) ([]model.ChapterMeta, error) {
 	slug = pathSafeSlug(slug)
-	if cached, ok := s.getChapterCache(slug); ok {
+	cached, ok, generation := s.getChapterCache(slug)
+	if ok {
 		return cached, nil
 	}
 
@@ -117,7 +121,7 @@ func (s *Store) ListChapters(slug string) ([]model.ChapterMeta, error) {
 		return result[i].ChapterNo < result[j].ChapterNo
 	})
 
-	s.setChapterCache(slug, result)
+	s.setChapterCache(slug, result, generation)
 	return cloneChapterMeta(result), nil
 }
 
@@ -203,6 +207,13 @@ func (s *Store) SaveChapter(slug string, chapterNo int, sourceTitle, transTitle 
 	writeLock := s.chapterWriteLock(slug, chapterNo)
 	writeLock.Lock()
 	defer writeLock.Unlock()
+	changed := false
+	defer func() {
+		if changed {
+			s.invalidateChapterCache(slug)
+			s.scheduleNovelStatsUpdate(slug)
+		}
+	}()
 
 	numStr := fmt.Sprintf("%04d", chapterNo)
 	chaptersDir := filepath.Join(s.DataDir, slug, "chapters")
@@ -231,6 +242,7 @@ func (s *Store) SaveChapter(slug string, chapterNo int, sourceTitle, transTitle 
 		if err := writeFileAtomic(filepath.Join(chaptersDir, numStr+".cn.json"), data); err != nil {
 			return fmt.Errorf("save chapter %d source: %w", chapterNo, err)
 		}
+		changed = true
 	}
 
 	// Save translated if provided (sanitize before it ever touches disk).
@@ -241,8 +253,12 @@ func (s *Store) SaveChapter(slug string, chapterNo int, sourceTitle, transTitle 
 		if err != nil {
 			return fmt.Errorf("load glossary for chapter %d: %w", chapterNo, err)
 		}
-		transTitle = translator.SanitizeText(transTitle, gMap)
-		cleaned := translator.SanitizeParagraphs(transParagraphs, gMap)
+		cleanTitle, titleDiag := translator.SanitizeTextWithDiagnostics(transTitle, gMap)
+		cleaned, paragraphDiag := translator.SanitizeParagraphsWithDiagnostics(transParagraphs, gMap)
+		if titleDiag.RemovedUnknownHanzi+paragraphDiag.RemovedUnknownHanzi > 0 {
+			return ErrIncompleteTranslation
+		}
+		transTitle = cleanTitle
 		thData := map[string]interface{}{
 			"novelId":    slug,
 			"chapterNo":  chapterNo,
@@ -263,15 +279,8 @@ func (s *Store) SaveChapter(slug string, chapterNo int, sourceTitle, transTitle 
 		if err := writeFileAtomic(filepath.Join(chaptersDir, numStr+".th.json"), data); err != nil {
 			return fmt.Errorf("save chapter %d translation: %w", chapterNo, err)
 		}
+		changed = true
 	}
-
-	// Chapter metadata cache is invalidated only when chapter files change.
-	// Repeated TOC/API reads therefore avoid rescanning thousands of files.
-	s.invalidateChapterCache(slug)
-
-	// Debounced stats update: coalesce bursts of saves (e.g. a 100-chapter
-	// import) into one directory scan + novel.json update per novel.
-	s.scheduleNovelStatsUpdate(slug)
 
 	return nil
 }
@@ -287,6 +296,9 @@ func (s *Store) RepairChapter(slug string, chapterNo int) (*model.ChapterContent
 		return chapter, nil // nothing to repair
 	}
 	if err := s.SaveChapter(slug, chapterNo, chapter.SourceTitle, chapter.TranslatedTitle, nil, chapter.TranslatedText); err != nil {
+		if errors.Is(err, ErrIncompleteTranslation) {
+			return chapter, nil
+		}
 		return nil, err
 	}
 	return s.GetChapter(slug, chapterNo)
@@ -332,8 +344,8 @@ func cleanChapterTitle(t string) string {
 // Helper: parse flexible chapter JSON (handles raw strings or {"text": "..."} objects, and string/struct titles)
 func parseChapterJSON(data []byte, content *model.ChapterContent, isSource bool) error {
 	var raw struct {
-		Title      json.RawMessage   `json:"title"`
-		Paragraphs []json.RawMessage `json:"paragraphs"`
+		Title      json.RawMessage `json:"title"`
+		Paragraphs json.RawMessage `json:"paragraphs"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -364,22 +376,37 @@ func parseChapterJSON(data []byte, content *model.ChapterContent, isSource bool)
 		}
 	}
 
-	lines := make([]string, 0, len(raw.Paragraphs))
-	for i, pRaw := range raw.Paragraphs {
-		var text string
-		if err := json.Unmarshal(pRaw, &text); err != nil {
-			var obj struct {
-				Text string `json:"text"`
+	// Native files contain strings. Decode the array together instead of
+	// allocating a RawMessage and a decoder for every paragraph. Keep the
+	// flexible legacy path for mixed string/{text: ...} imports.
+	var paragraphs []string
+	if len(raw.Paragraphs) > 0 {
+		if err := json.Unmarshal(raw.Paragraphs, &paragraphs); err != nil {
+			var legacy []json.RawMessage
+			if err := json.Unmarshal(raw.Paragraphs, &legacy); err != nil {
+				return err
 			}
-			if objErr := json.Unmarshal(pRaw, &obj); objErr != nil {
-				return fmt.Errorf("paragraph %d has unsupported format", i+1)
+			paragraphs = make([]string, len(legacy))
+			for i, item := range legacy {
+				if err := json.Unmarshal(item, &paragraphs[i]); err != nil {
+					var obj struct {
+						Text string `json:"text"`
+					}
+					if err := json.Unmarshal(item, &obj); err != nil {
+						return fmt.Errorf("paragraph %d has unsupported format", i+1)
+					}
+					paragraphs[i] = obj.Text
+				}
 			}
-			text = obj.Text
 		}
+	}
+	lines := paragraphs[:0]
+	for _, text := range paragraphs {
 		if text = strings.TrimSpace(text); text != "" {
 			lines = append(lines, text)
 		}
 	}
+	clear(paragraphs[len(lines):])
 	if isSource {
 		content.SourceText = lines
 	} else {

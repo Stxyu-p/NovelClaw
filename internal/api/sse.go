@@ -45,7 +45,9 @@ func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Send initial ping
-	fmt.Fprintf(w, "data: {\"type\":\"connected\"}\n\n")
+	if _, err := fmt.Fprintf(w, "data: {\"type\":\"connected\"}\n\n"); err != nil {
+		return
+	}
 	flusher.Flush()
 
 	notify := r.Context().Done()
@@ -57,7 +59,9 @@ func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", msg)
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", msg); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}

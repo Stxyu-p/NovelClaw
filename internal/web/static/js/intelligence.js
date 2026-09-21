@@ -3,6 +3,10 @@ import { escapeHTML } from './utils.js';
 export function createIntelligenceController({
   state, el, api, showToast, openModal, closeModal, loadChapters,
 }) {
+  let session = 0;
+  let loaded = false;
+  let editVersion = 0;
+  const isCurrent = (id, slug) => id === session && state.currentSlug === slug && !el.modalIntelligence.classList.contains('hidden');
   function applyMemoryToForm(memory) {
     state.novelMemory = {
       storySummary: memory?.storySummary || '',
@@ -28,18 +32,29 @@ export function createIntelligenceController({
 
   async function openIntelligenceModal() {
     if (!state.currentSlug) return;
+    const id = ++session, slug = state.currentSlug;
+    loaded = false;
     openModal(el.modalIntelligence);
+    el.memorySummary.value = '';
+    el.memoryFacts.value = '';
+    el.memoryCharacters.innerHTML = '';
     el.qaSummary.textContent = 'กำลังโหลดข้อมูล...';
+    el.qaScoreStrip.innerHTML = '';
+    el.qaRepairList.innerHTML = '';
     try {
       const [memory, qaRes] = await Promise.all([
         api(`/api/novels/${state.currentSlug}/memory`),
         api(`/api/novels/${state.currentSlug}/qa`),
       ]);
+      if (!isCurrent(id, slug)) return;
+      loaded = true;
       applyMemoryToForm(memory);
       state.qaReports = qaRes.reports || [];
       setDefaultMemoryRange();
       renderQASummary();
     } catch (err) {
+      if (!isCurrent(id, slug)) return;
+      el.qaSummary.textContent = 'โหลดข้อมูลไม่สำเร็จ กรุณาปิดแล้วเปิดใหม่';
       console.error('load intelligence failed', err);
     }
   }
@@ -113,7 +128,8 @@ export function createIntelligenceController({
 
   async function saveMemory(event) {
     event.preventDefault();
-    if (!state.currentSlug) return;
+    if (!state.currentSlug || !loaded) return;
+    const id = session, slug = state.currentSlug;
     const memory = {
       novelSlug: state.currentSlug,
       storySummary: el.memorySummary.value.trim(),
@@ -125,6 +141,7 @@ export function createIntelligenceController({
         method: 'POST',
         body: JSON.stringify(memory),
       });
+      if (!isCurrent(id, slug)) return;
       state.novelMemory = saved;
       el.memoryAiStatus.textContent = 'บันทึก Memory แล้ว — การแปลครั้งถัดไปจะใช้บริบทชุดนี้';
       showToast('บันทึก Story Memory เรียบร้อยแล้ว', 'success');
@@ -134,7 +151,8 @@ export function createIntelligenceController({
   }
 
   async function generateMemoryDraft() {
-    if (!state.currentSlug) return;
+    if (!state.currentSlug || !loaded || el.btnGenerateMemory.disabled) return;
+    const id = session, slug = state.currentSlug, edits = editVersion;
     const startChapter = Number(el.memoryAiStart.value || 0);
     const endChapter = Number(el.memoryAiEnd.value || 0);
     const originalText = el.btnGenerateMemory.textContent;
@@ -146,10 +164,16 @@ export function createIntelligenceController({
         method: 'POST',
         body: JSON.stringify({ startChapter, endChapter }),
       });
+      if (!isCurrent(id, slug)) return;
+      if (edits !== editVersion) {
+        el.memoryAiStatus.textContent = 'มีการแก้ไขระหว่างสร้าง Draft จึงเก็บการแก้ไขของคุณไว้';
+        return;
+      }
       applyMemoryToForm(res.merged || res.candidate || {});
       el.memoryAiStatus.textContent = `Draft จากตอน ${res.startChapter}–${res.endChapter} (${res.chaptersUsed} ตอน) · ${res.provider}/${res.model} · ยังไม่บันทึก`;
       showToast('สร้าง Memory Draft แล้ว — ตรวจแก้ก่อนกดบันทึก', 'success');
     } catch (err) {
+      if (!isCurrent(id, slug)) return;
       el.memoryAiStatus.textContent = `สร้าง Draft ไม่สำเร็จ: ${err.message || err}`;
       console.error('generate memory draft failed', err);
     } finally {
@@ -160,11 +184,13 @@ export function createIntelligenceController({
 
   async function rebuildQA() {
     if (!state.currentSlug) return;
+    const id = session, slug = state.currentSlug;
     const originalText = el.btnRebuildQA.textContent;
     el.btnRebuildQA.disabled = true;
     el.btnRebuildQA.textContent = '⏳ กำลังสแกน...';
     try {
       const res = await api(`/api/novels/${state.currentSlug}/qa/rebuild`, { method: 'POST' });
+      if (!isCurrent(id, slug)) return;
       state.qaReports = res.reports || [];
       renderQASummary();
       await loadChapters(state.currentSlug);
@@ -179,6 +205,7 @@ export function createIntelligenceController({
 
   async function repairQAChapter(chapterNo, button) {
     if (!state.currentSlug || !chapterNo) return;
+    const id = session, slug = state.currentSlug;
     const originalText = button?.textContent || '';
     if (button) {
       button.disabled = true;
@@ -189,6 +216,7 @@ export function createIntelligenceController({
         method: 'POST',
         body: JSON.stringify({ targetScore: 90 }),
       });
+      if (!isCurrent(id, slug)) return;
       const report = res.report;
       if (report) {
         state.qaReports = (state.qaReports || []).filter(item => Number(item.chapterNo) !== Number(chapterNo));
@@ -212,9 +240,10 @@ export function createIntelligenceController({
   }
 
   function bindIntelligenceEvents() {
+    el.formMemory?.addEventListener('input', () => { editVersion++; });
     el.btnOpenIntelligence?.addEventListener('click', openIntelligenceModal);
     el.btnCloseIntelligence?.addEventListener('click', () => closeModal(el.modalIntelligence));
-    el.btnAddMemoryCharacter?.addEventListener('click', () => appendMemoryCharacterRow());
+    el.btnAddMemoryCharacter?.addEventListener('click', () => { if (loaded) { editVersion++; appendMemoryCharacterRow(); } });
     el.formMemory?.addEventListener('submit', saveMemory);
     el.btnGenerateMemory?.addEventListener('click', generateMemoryDraft);
     el.btnRebuildQA?.addEventListener('click', rebuildQA);
@@ -226,6 +255,7 @@ export function createIntelligenceController({
     el.memoryCharacters?.addEventListener('click', event => {
       const button = event.target.closest('.btn-remove-memory-character');
       if (!button) return;
+      editVersion++;
       button.closest('.memory-character-row')?.remove();
     });
   }

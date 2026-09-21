@@ -453,6 +453,26 @@ func importPercentage(processed, total int) int {
 	return pct
 }
 func (h *APIHandler) broadcastImport(jobID, eventType, slug string, fields map[string]interface{}) {
+	h.jobsMu.Lock()
+	if progress := h.activeJobs[jobID]; progress != nil {
+		progress.NovelSlug = slug
+		if percentage, ok := fields["percentage"].(int); ok {
+			progress.Percentage = percentage
+		}
+		if total, ok := fields["total"].(int); ok {
+			progress.TotalChapters = total
+		}
+		if current, ok := fields["current"].(int); ok {
+			progress.CurrentChapter = current
+		}
+		if message, ok := fields["message"].(string); ok {
+			progress.Message = message
+		}
+		if eventType != "import_progress" {
+			progress.Status = eventType
+		}
+	}
+	h.jobsMu.Unlock()
 	event := map[string]interface{}{
 		"type":      eventType,
 		"jobId":     jobID,

@@ -28,15 +28,18 @@ type Store struct {
 	statsMu    sync.Mutex
 	statsTimer map[string]*time.Timer
 
-	chapterCacheMu sync.RWMutex
-	chapterCache   map[string][]model.ChapterMeta
+	chapterCacheMu    sync.RWMutex
+	chapterCache      map[string][]model.ChapterMeta
+	chapterGeneration uint64
 
-	glossaryCacheMu sync.RWMutex
-	glossaryCache   map[string]map[string]string
+	glossaryCacheMu    sync.RWMutex
+	glossaryCache      map[string]map[string]string
+	glossaryGeneration uint64
 
 	qaCacheMu     sync.RWMutex
 	qaCache       map[string]map[int]model.TranslationQualityReport
 	qaCacheLoaded map[string]bool
+	qaGeneration  uint64
 
 	// Fixed striped locks serialize writes to the same chapter/file family
 	// without making unrelated chapters wait on one global filesystem lock.

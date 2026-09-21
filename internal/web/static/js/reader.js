@@ -2,19 +2,33 @@ import { escapeHTML } from './utils.js';
 
 export function createReaderController({
   state, el, api, showView, showToast,
-  maxChapterNo, openNovelDetail, triggerQuickTranslate, stopTTS,
+  maxChapterNo, adjacentChapterNo, openNovelDetail, triggerQuickTranslate, stopTTS,
+  saveReadingPosition = () => {},
+  saveBookmark = (slug, chapterNo) => api(`/api/novels/${encodeURIComponent(slug)}/bookmark`, {
+    method: 'POST', body: JSON.stringify({ chapterNo, scrollPercentage: 0 }), silent: true,
+  }),
 }) {
+  let requestID = 0;
+  let chapterRequest = null;
+  let restoreTimer = null;
+
+  function cancelPendingLoad() {
+    requestID += 1;
+    chapterRequest?.abort();
+    clearTimeout(restoreTimer);
+  }
+
   async function openChapter(slug, chapterNo) {
+    saveReadingPosition();
     if (state.tts.speaking) stopTTS();
     state.currentSlug = slug;
     state.currentChapterNo = chapterNo;
+    state.currentChapterData = null;
     showView('reader');
-    await loadChapterContent(slug, chapterNo);
-    api(`/api/novels/${encodeURIComponent(slug)}/bookmark`, {
-      method: 'POST',
-      body: JSON.stringify({ chapterNo, scrollPercentage: 0 }),
-      silent: true,
-    }).catch(err => console.warn('bookmark save failed', err));
+    const loaded = await loadChapterContent(slug, chapterNo);
+    if (!loaded) return false;
+    saveBookmark(slug, chapterNo).catch(err => console.warn('bookmark save failed', err));
+    return state.currentView === 'reader' && state.currentSlug === slug && state.currentChapterNo === chapterNo;
   }
 
   function qaBadge(report) {
@@ -23,9 +37,19 @@ export function createReaderController({
     return `<span class="badge reader-qa-badge qa-${level}">QA ${report.score}</span>`;
   }
   async function loadChapterContent(slug, chapterNo) {
+    cancelPendingLoad();
+    const id = requestID;
+    const isCurrent = () => id === requestID && state.currentView === 'reader'
+      && state.currentSlug === slug && state.currentChapterNo === chapterNo;
+    chapterRequest = new AbortController();
+    state.currentChapterData = null;
+    el.readerChapterTitle.textContent = `ตอนที่ ${chapterNo}`;
+    el.readerContent.setAttribute('aria-busy', 'true');
     el.readerContent.innerHTML = '<div class="reader-state">กำลังโหลด...</div>';
+    updateNavigationState(chapterNo);
     try {
-      const chapter = await api(`/api/novels/${encodeURIComponent(slug)}/chapters/${chapterNo}`);
+      const chapter = await api(`/api/novels/${encodeURIComponent(slug)}/chapters/${chapterNo}`, { signal: chapterRequest.signal, silent: true });
+      if (!isCurrent()) return false;
       state.currentChapterData = chapter;
       const novel = state.currentNovel || { title: slug };
       el.readerNovelTitle.textContent = novel.translatedTitle || novel.title || slug;
@@ -37,16 +61,21 @@ export function createReaderController({
       el.readerChapterTitle.innerHTML = `${escapeHTML(title)} ${qaBadge(qa)}`;
       renderReaderParagraphs();
       updateNavigationState(chapterNo);
+      return true;
     } catch (err) {
-      el.readerContent.innerHTML = `<div class="reader-state reader-state-error">ไม่พบเนื้อหาตอนที่ ${chapterNo}</div>`;
+      if (!isCurrent() || err.name === 'AbortError') return false;
+      el.readerContent.innerHTML = `<div class="reader-state reader-state-error">โหลดตอนที่ ${chapterNo} ไม่สำเร็จ <button class="btn btn-outline" type="button" data-action="retry-current">ลองอีกครั้ง</button></div>`;
       console.error('load chapter failed', err);
+      return false;
+    } finally {
+      if (id === requestID) el.readerContent.removeAttribute('aria-busy');
     }
   }
 
   function updateNavigationState(chapterNo) {
     const index = (state.chapters || []).findIndex(chapter => chapter.chapterNo === chapterNo);
-    const hasPrev = index >= 0 ? index > 0 : chapterNo > 1;
-    const hasNext = index >= 0 ? index < state.chapters.length - 1 : chapterNo < maxChapterNo();
+    const hasPrev = adjacentChapterNo ? adjacentChapterNo(chapterNo, -1) !== null : index >= 0 ? index > 0 : chapterNo > 1;
+    const hasNext = adjacentChapterNo ? adjacentChapterNo(chapterNo, 1) !== null : index >= 0 ? index < state.chapters.length - 1 : chapterNo < maxChapterNo();
     el.btnPrevChapter.disabled = !hasPrev;
     el.btnNextChapter.disabled = !hasNext;
     if (el.btnPrevChapterTop) el.btnPrevChapterTop.disabled = !hasPrev;
@@ -93,9 +122,14 @@ export function createReaderController({
   }
 
   function restoreScrollPosition() {
+    clearTimeout(restoreTimer);
+    const id = requestID;
     const saved = Number.parseInt(localStorage.getItem(`nc_scroll_${state.currentSlug}_${state.currentChapterNo}`), 10);
-    if (!Number.isFinite(saved) || saved <= 0) return;
-    window.setTimeout(() => window.scrollTo({ top: saved, behavior: 'auto' }), 80);
+    restoreTimer = window.setTimeout(() => {
+      if (id === requestID && state.currentView === 'reader') {
+        window.scrollTo({ top: Number.isFinite(saved) ? Math.max(0, saved) : 0, behavior: 'auto' });
+      }
+    }, 80);
   }
   function getModeLabel(mode) {
     if (mode === 'bilingual') return '2 ภาษา';
@@ -108,6 +142,7 @@ export function createReaderController({
   }
 
   function cycleReadingMode() {
+    saveReadingPosition();
     state.readingMode = state.readingMode === 'thai'
       ? 'bilingual'
       : state.readingMode === 'bilingual' ? 'source' : 'thai';
@@ -127,6 +162,10 @@ export function createReaderController({
       if (state.currentSlug) openNovelDetail(state.currentSlug);
     });
     el.readerContent?.addEventListener('click', event => {
+      if (event.target.closest('[data-action="retry-current"]')) {
+        openChapter(state.currentSlug, state.currentChapterNo);
+        return;
+      }
       if (!event.target.closest('[data-action="translate-current"]')) return;
       triggerQuickTranslate(state.currentSlug, state.currentChapterNo, state.currentChapterNo);
     });
@@ -140,5 +179,6 @@ export function createReaderController({
     updateModeButtonText,
     getModeLabel,
     bindReaderCoreEvents,
+    cancelPendingLoad,
   };
 }

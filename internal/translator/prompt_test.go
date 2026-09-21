@@ -144,8 +144,8 @@ func TestParseTranslationOutput_StripUnclosedThinkTag(t *testing.T) {
 	input := "<think>This reasoning never closes\nย่อหน้าจริง"
 	_, paras := ParseTranslationOutput(input)
 
-	if len(paras) < 1 {
-		t.Error("Expected at least 1 paragraph after stripping unclosed think tag")
+	if len(paras) != 0 {
+		t.Error("Unfinished reasoning must not become translated content")
 	}
 }
 

@@ -3,6 +3,11 @@ import { escapeHTML } from './utils.js';
 export function createLibraryController({
   state, el, api, showView, openChapter, openImportModal, formatGenre, showToast,
 }) {
+  let detailRequest = 0;
+  let chapterRequest = 0;
+  let searchTimer = null;
+  let libraryTimer = null;
+  let libraryVersion = 0;
   // Hidden file picker behind the "เปลี่ยนปก" button on the detail hero.
   const coverPicker = document.createElement('input');
   coverPicker.type = 'file';
@@ -84,16 +89,27 @@ export function createLibraryController({
         </div>
       </article>`;
   }
+  function renderLibrary() {
+    if (!state.novels.length) { renderEmptyLibrary(); return; }
+    const query = (document.getElementById('library-search')?.value || '').trim().toLocaleLowerCase();
+    const order = document.getElementById('library-sort')?.value || 'recent';
+    const novels = state.novels.filter(novel => `${novel.title || ''} ${novel.translatedTitle || ''} ${novel.author || ''}`.toLocaleLowerCase().includes(query));
+    novels.sort((a,b) => order === 'title' ? (a.translatedTitle || a.title || '').localeCompare(b.translatedTitle || b.title || '', 'th') : order === 'translated' ? (b.translatedChapters || 0) - (a.translatedChapters || 0) : (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0));
+    el.novelCount.textContent = `${novels.length} / ${state.novels.length} เรื่อง`;
+    el.novelGrid.innerHTML = novels.length ? novels.map(renderNovelCard).join('') : '<div class="library-empty"><h2>ไม่พบเรื่องที่ค้นหา</h2><p>ลองใช้ชื่อสั้นลง หรือค้นหาจากผู้แต่ง</p><button class="btn btn-outline" data-action="clear-search">ล้างการค้นหา</button></div>';
+  }
   async function loadNovels() {
+    const version = ++libraryVersion;
     try {
       const res = await api('/api/novels');
+      if (version !== libraryVersion) return;
       state.novels = res.novels || [];
       el.novelCount.textContent = `${state.novels.length} เรื่อง`;
       if (state.novels.length === 0) {
         renderEmptyLibrary();
         return;
       }
-      el.novelGrid.innerHTML = state.novels.map(renderNovelCard).join('');
+      renderLibrary();
     } catch (err) {
       showToast('โหลดรายการนิยายไม่สำเร็จ: ' + (err?.message || err), 'error');
       console.error('loadNovels failed', err);
@@ -108,22 +124,33 @@ export function createLibraryController({
     if (el.chapterFilter) el.chapterFilter.value = 'all';
   }
   async function openNovelDetail(slug) {
+    const request = ++detailRequest;
     const switchingNovel = state.currentSlug !== slug;
     state.currentSlug = slug;
     if (switchingNovel) resetChapterBrowser();
+    if (switchingNovel) {
+      state.currentNovel = null;
+      state.chapters = [];
+      state.qaReports = [];
+    }
     showView('detail');
+    el.detailHeader.innerHTML = '<div class="reader-state" role="status">กำลังเปิดเรื่อง...</div>';
+    el.chapterList.innerHTML = '<div class="reader-state" role="status">กำลังโหลดสารบัญ...</div>';
 
     try {
       const [novel, bookmark] = await Promise.all([
-        api(`/api/novels/${slug}`),
-        api(`/api/novels/${slug}/bookmark`, { silent: true }).catch(() => ({ chapterNo: 1 })),
+        api(`/api/novels/${encodeURIComponent(slug)}`),
+        api(`/api/novels/${encodeURIComponent(slug)}/bookmark`, { silent: true }).catch(() => ({ chapterNo: 1 })),
       ]);
+      if (request !== detailRequest || state.currentSlug !== slug || state.currentView !== 'detail') return;
       state.currentNovel = novel;
       const latestCh = bookmark.chapterNo || 1;
       renderNovelDetailHeader(novel, latestCh);
       if (novel.genre && el.transGenre) el.transGenre.value = novel.genre;
       await loadChapters(slug);
     } catch (err) {
+      if (request !== detailRequest || state.currentSlug !== slug || state.currentView !== 'detail') return;
+      el.detailHeader.innerHTML = '<div class="reader-state reader-state-error">เปิดเรื่องไม่สำเร็จ กรุณากลับคลังแล้วลองอีกครั้ง</div>';
       showToast('เปิดเรื่องไม่สำเร็จ: ' + (err?.message || err), 'error');
       console.error('openNovelDetail failed', err);
     }
@@ -160,15 +187,19 @@ export function createLibraryController({
       </div>`;
   }
   async function loadChapters(slug) {
+    if (slug !== state.currentSlug) return;
+    const request = ++chapterRequest;
     try {
       const [chapterRes, qaRes] = await Promise.all([
-        api(`/api/novels/${slug}/chapters`),
-        api(`/api/novels/${slug}/qa`),
+        api(`/api/novels/${encodeURIComponent(slug)}/chapters`),
+        api(`/api/novels/${encodeURIComponent(slug)}/qa`, { silent: true }).catch(() => null),
       ]);
+      if (request !== chapterRequest || state.currentSlug !== slug) return;
       state.chapters = chapterRes.chapters || [];
-      state.qaReports = qaRes.reports || [];
-      renderChapterList(slug);
+      if (qaRes) state.qaReports = qaRes.reports || [];
+      if (state.currentView === 'detail') renderChapterList(slug);
     } catch (err) {
+      if (request !== chapterRequest || state.currentSlug !== slug) return;
       showToast('โหลดรายการตอนไม่สำเร็จ: ' + (err?.message || err), 'error');
       console.error('loadChapters failed', err);
     }
@@ -251,6 +282,8 @@ export function createLibraryController({
     if (card?.dataset.slug) openNovelDetail(card.dataset.slug);
   }
   function bindLibraryEvents() {
+    document.getElementById('library-search')?.addEventListener('input', () => { clearTimeout(libraryTimer); libraryTimer = setTimeout(renderLibrary, 120); });
+    document.getElementById('library-sort')?.addEventListener('change', renderLibrary);
     const hideBrokenCover = event => {
       const image = event.target?.closest?.('.novel-cover-image, .novel-detail-cover-image');
       if (image) image.classList.add('is-missing');
@@ -262,9 +295,11 @@ export function createLibraryController({
         openImportModal();
         return;
       }
+      if (event.target.closest('[data-action="clear-search"]')) { document.getElementById('library-search').value = ''; renderLibrary(); return; }
       activateNovelCard(event.target);
     });
     el.novelGrid?.addEventListener('keydown', event => {
+      if (event.target.closest('button, input, select, a')) return;
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
         activateNovelCard(event.target);
@@ -282,7 +317,8 @@ export function createLibraryController({
     el.chapterSearch?.addEventListener('input', () => {
       state.chapterQuery = el.chapterSearch.value;
       state.chapterPage = 1;
-      renderChapterList();
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => { if (state.currentView === 'detail') renderChapterList(); }, 120);
     });
     el.chapterFilter?.addEventListener('change', () => {
       state.chapterFilter = el.chapterFilter.value;

@@ -6,6 +6,7 @@
   <title>NovelClaw — ตัวอ่านและแปลนิยาย</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/design.css">
 </head>
 <body data-theme="dark">
 
@@ -14,10 +15,10 @@
 
   <!-- Main Header -->
   <header class="app-header">
-    <div class="brand" id="btn-brand">
-      <span class="brand-icon">🐾</span>
-      <span class="brand-text">NovelClaw</span>
-    </div>
+    <button type="button" class="brand" id="btn-brand" aria-label="กลับคลังนิยาย">
+      <span class="brand-icon" aria-hidden="true">N<span>c</span></span>
+      <span class="brand-text">NovelClaw<small>พื้นที่สำหรับเรื่องโปรด</small></span>
+    </button>
     <div class="header-actions">
       <button class="provider-status" id="btn-provider-status" type="button" title="เปิดการตั้งค่า AI Provider">
         <span class="provider-status-dot" aria-hidden="true"></span>
@@ -33,18 +34,20 @@
   </header>
 
   <!-- Toast Notification Container -->
-  <div class="toast-container" id="toast-container"></div>
+  <div id="connection-status" class="connection-status hidden" role="status">ขาดการเชื่อมต่อกับแอป กำลังเชื่อมต่อใหม่อัตโนมัติ…</div>
+  <div class="toast-container" id="toast-container" role="status" aria-live="polite"></div>
 
   <!-- View 1: Library (All Novels) -->
   <main class="container library-view" id="view-library">
     <section class="library-intro">
       <div>
-        <span class="section-kicker">YOUR LIBRARY</span>
-        <h1>เรื่องที่กำลังอ่าน</h1>
-        <p>จัดการนิยาย แปลต่อ และกลับไปอ่านจากจุดล่าสุดได้ในที่เดียว</p>
+        <span class="section-kicker">คลังส่วนตัว</span>
+        <h1>อีกบทของเรื่องโปรด</h1>
+        <p>เปิดอ่านต่อเมื่อพร้อม แปลเพิ่มเมื่ออยากรู้ว่าบทต่อไปเป็นอย่างไร</p>
       </div>
       <span id="novel-count" class="library-count">0 เรื่อง</span>
     </section>
+    <div class="library-controls"><label class="library-search"><span aria-hidden="true">⌕</span><input id="library-search" type="search" placeholder="ค้นหาชื่อเรื่องหรือผู้แต่ง" aria-label="ค้นหาในคลัง"></label><label class="library-sort">เรียงตาม<select id="library-sort" class="form-select"><option value="recent">อัปเดตล่าสุด</option><option value="title">ชื่อเรื่อง</option><option value="translated">ตอนที่แปลแล้ว</option></select></label></div>
     <div class="novel-grid" id="novel-grid">
       <!-- Injected by JavaScript -->
     </div>
@@ -61,14 +64,14 @@
     </div>
 
     <div class="chapter-section-header">
-      <div><span class="section-kicker">EPISODES</span><h2>รายชื่อตอน</h2></div>
+      <div><span class="section-kicker">สารบัญ</span><h2>รายชื่อตอน</h2></div>
       <div class="detail-tools">
         <button class="btn btn-primary btn-sm" id="btn-quick-translate">⚡ แปลเป็นช่วง</button>
         <details class="detail-tool-menu">
           <summary class="btn btn-outline btn-sm">••• เครื่องมือ</summary>
           <div class="detail-tool-popover">
             <button class="btn btn-ghost btn-sm" id="btn-open-glossary">📖 คำศัพท์</button>
-            <button class="btn btn-ghost btn-sm" id="btn-open-intelligence">🧠 Memory & QA</button>
+            <button class="btn btn-ghost btn-sm" id="btn-open-intelligence">ความต่อเนื่องและตรวจคำแปล</button>
             <button class="btn btn-ghost btn-sm" id="btn-open-export">📦 ส่งออก</button>
           </div>
         </details>
@@ -77,13 +80,13 @@
 
     <div class="chapter-toolbar" id="chapter-toolbar">
       <div class="chapter-toolbar-main">
-        <input type="search" class="form-input chapter-search" id="chapter-search" placeholder="ค้นหาเลขตอนหรือชื่อตอน..." autocomplete="off">
+        <input type="search" class="form-input chapter-search" id="chapter-search" aria-label="ค้นหาตอน" placeholder="ค้นหาเลขตอนหรือชื่อตอน..." autocomplete="off">
         <select class="form-select chapter-filter" id="chapter-filter" aria-label="กรองรายชื่อตอน">
           <option value="all">ทุกตอน</option>
           <option value="translated">แปลแล้ว</option>
           <option value="source">ยังไม่แปล</option>
-          <option value="qa-review">QA ต่ำกว่า 90</option>
-          <option value="qa-bad">QA ต่ำกว่า 75</option>
+          <option value="qa-review">ควรตรวจคำแปล</option>
+          <option value="qa-bad">ควรแก้คำแปล</option>
         </select>
       </div>
       <div class="chapter-pagination">
@@ -448,8 +451,8 @@
     <div class="modal-content settings-modal">
       <div class="modal-header settings-header">
         <div class="settings-title-group">
-          <span class="settings-kicker">AI SETTINGS</span>
-          <div class="settings-title-line"><span aria-hidden="true">⚙️</span><h3>AI Provider & Runtime</h3></div>
+          <span class="settings-kicker">ตั้งค่า AI</span>
+          <div class="settings-title-line"><span aria-hidden="true">⚙️</span><h3>การเชื่อมต่อและการแปล</h3></div>
           <p>จัดการผู้ให้บริการ การเชื่อมต่อ และโมเดลจากหน้าเดียว</p>
         </div>
         <button class="btn btn-ghost btn-icon settings-close" id="btn-close-settings" aria-label="ปิดการตั้งค่า">✕</button>
@@ -467,7 +470,7 @@
         </section>
         <section class="settings-section settings-connection-panel">
           <div class="settings-section-head">
-            <div class="settings-section-copy"><span class="settings-step">02</span><div><h4>Connection & Model</h4><p>กำหนดปลายทาง การยืนยันตัวตน และโมเดล</p></div></div>
+            <div class="settings-section-copy"><span class="settings-step">02</span><div><h4>ปลายทางและโมเดล</h4><p>กำหนดปลายทาง การยืนยันตัวตน และโมเดล</p></div></div>
           </div>
           <div class="settings-fields">
             <div class="form-group settings-field-row">
@@ -491,7 +494,7 @@
         </section>
         <section class="settings-section settings-advanced-panel">
           <details class="advanced-settings" open>
-            <summary><div class="settings-section-copy"><span class="settings-step">03</span><div><h4>Advanced Runtime</h4><p>ปรับเฉพาะเมื่อต้องการควบคุมการทำงานละเอียดขึ้น</p></div></div><span class="settings-chevron" aria-hidden="true">⌄</span></summary>
+            <summary><div class="settings-section-copy"><span class="settings-step">03</span><div><h4>ตัวเลือกเพิ่มเติม</h4><p>ปรับเฉพาะเมื่อต้องการควบคุมการทำงานละเอียดขึ้น</p></div></div><span class="settings-chevron" aria-hidden="true">⌄</span></summary>
             <div class="settings-grid-3 advanced-grid">
               <div class="form-group"><label class="form-label" for="cfg-temp">Temperature</label><input type="number" min="0" max="2" step="0.05" class="form-input" id="cfg-temp" value="0.3"></div>
               <div class="form-group"><label class="form-label" for="cfg-parallel">Parallel jobs</label><input type="number" min="1" max="8" step="1" class="form-input" id="cfg-parallel" value="2"></div>
@@ -502,7 +505,7 @@
         </section>
         <div id="provider-test-result" class="provider-test-result" aria-live="polite"></div>
         <div class="settings-actions">
-          <div class="settings-action-copy"><strong>พร้อมใช้งานเมื่อการเชื่อมต่อผ่าน</strong><span>ทดสอบ Provider ก่อนบันทึกเพื่อเช็ก URL, Key และ Model</span></div>
+          <div class="settings-action-copy"><strong>ตรวจการเชื่อมต่อก่อนเริ่มแปล</strong><span>ตรวจรายชื่อโมเดลโดยไม่สร้างคำแปล จากนั้นบันทึกการตั้งค่า</span></div>
           <div class="settings-action-buttons">
             <button type="button" class="btn btn-outline" id="btn-test-provider">🧪 ทดสอบ</button>
             <button type="submit" class="btn btn-primary" id="btn-save-settings">✓ บันทึกและใช้งาน</button>

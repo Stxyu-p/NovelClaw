@@ -1,6 +1,10 @@
+import { createAudioCache } from './audio_cache.js';
+
 export function createTTSController({ state, el, showToast, adjacentChapterNo, openChapter }) {
   let bound = false;
   let activeChapterKey = '';
+  let playbackID = 0;
+  const audioCache = createAudioCache();
 
   function chapterIdentity() {
     return `${state.currentSlug || ''}:${state.currentChapterNo || 0}`;
@@ -20,14 +24,14 @@ export function createTTSController({ state, el, showToast, adjacentChapterNo, o
   }
 
   function clearAudioCache() {
-    for (const url of Object.values(state.tts.audioBlobs || {})) {
-      if (typeof url === 'string' && url.startsWith('blob:')) URL.revokeObjectURL(url);
-    }
-    state.tts.audioBlobs = {};
+    audioCache.clear();
   }
 
   function stopCurrentPlayback() {
+    playbackID += 1;
     if (state.tts.audioElement) {
+      state.tts.audioElement.onended = null;
+      state.tts.audioElement.onerror = null;
       state.tts.audioElement.pause();
       state.tts.audioElement = null;
     }
@@ -135,6 +139,7 @@ export function createTTSController({ state, el, showToast, adjacentChapterNo, o
     state.tts.paused = false;
     clearParagraphHighlight();
     clearAudioCache();
+    state.tts.paragraphs = [];
     el.ttsPlayerBar?.classList.add('hidden');
   }
 
@@ -173,8 +178,8 @@ export function createTTSController({ state, el, showToast, adjacentChapterNo, o
         const current = state.currentChapterNo;
         stopTTS();
         showToast(`จบตอน ${current} — อ่านเสียงต่อตอน ${nextChapter}... 📖`, 'info');
-        await openChapter(state.currentSlug, nextChapter);
-        startTTS();
+        const id = playbackID;
+        if (await openChapter(state.currentSlug, nextChapter) && id === playbackID) startTTS();
         return;
       }
       stopTTS();
@@ -183,52 +188,42 @@ export function createTTSController({ state, el, showToast, adjacentChapterNo, o
     }
 
     stopCurrentPlayback();
+    const id = playbackID;
     const idx = state.tts.currentIdx;
     const text = state.tts.paragraphs[idx];
     const speed = Number.parseFloat(el.ttsSpeed?.value || state.tts.speed || '1') || 1.0;
     state.tts.speed = speed;
     const requestChapterKey = chapterIdentity();
+    const isCurrent = () => id === playbackID && state.tts.speaking
+      && state.tts.currentIdx === idx && chapterIdentity() === requestChapterKey;
     highlightParagraph(idx);
     if (el.ttsStatus) {
       el.ttsStatus.innerText = `อ่านย่อหน้า ${idx + 1}/${state.tts.paragraphs.length}`;
     }
-    prefetchNextAudio(idx + 1);
-
     if (state.tts.voice === 'browser') {
-      browserSpeech(text, speed, () => advanceAfterSpeech(idx));
+      browserSpeech(text, speed, () => { if (isCurrent()) advanceAfterSpeech(idx); });
       return;
     }
 
     const key = audioCacheKey(idx, text, speed);
     try {
-      let audioBlobUrl = state.tts.audioBlobs[key];
-      if (!audioBlobUrl) {
-        const response = await fetch('/api/audio/speech', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, voice: state.tts.voice, speed }),
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const blob = await response.blob();
-        audioBlobUrl = URL.createObjectURL(blob);
-        state.tts.audioBlobs[key] = audioBlobUrl;
-      }
-
-      if (!state.tts.speaking || state.tts.currentIdx !== idx || chapterIdentity() !== requestChapterKey) {
-        return;
-      }
+      const loading = audioCache.get(key, { text, voice: state.tts.voice, speed });
+      prefetchNextAudio(idx + 1);
+      const audioBlobUrl = await loading;
+      if (!isCurrent()) return;
       const audio = new Audio(audioBlobUrl);
       audio.playbackRate = speed;
       state.tts.audioElement = audio;
-      audio.onended = () => advanceAfterSpeech(idx);
+      audio.onended = () => { if (isCurrent()) advanceAfterSpeech(idx); };
       audio.onerror = event => {
         console.warn('Audio playback error:', event);
-        advanceAfterSpeech(idx);
+        if (isCurrent()) advanceAfterSpeech(idx);
       };
-      await audio.play();
+      if (!state.tts.paused) await audio.play();
     } catch (err) {
+      if (!isCurrent() || err.name === 'AbortError' || state.tts.paused) return;
       console.warn('Neural TTS failed, falling back to browser speech:', err);
-      browserSpeech(text, speed, () => advanceAfterSpeech(idx));
+      browserSpeech(text, speed, () => { if (isCurrent()) advanceAfterSpeech(idx); });
     }
   }
 
@@ -238,18 +233,8 @@ export function createTTSController({ state, el, showToast, adjacentChapterNo, o
     const text = state.tts.paragraphs[nextIdx];
     const speed = state.tts.speed || 1.0;
     const key = audioCacheKey(nextIdx, text, speed);
-    if (state.tts.audioBlobs[key]) return;
-    const requestChapterKey = chapterIdentity();
     try {
-      const response = await fetch('/api/audio/speech', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voice: state.tts.voice, speed }),
-      });
-      if (!response.ok || !state.tts.speaking || chapterIdentity() !== requestChapterKey) return;
-      const blob = await response.blob();
-      if (!state.tts.speaking || chapterIdentity() !== requestChapterKey) return;
-      state.tts.audioBlobs[key] = URL.createObjectURL(blob);
+      await audioCache.get(key, { text, voice: state.tts.voice, speed });
     } catch {
       // Prefetch is best-effort; foreground playback handles fallback.
     }

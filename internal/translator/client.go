@@ -2,7 +2,9 @@ package translator
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -29,7 +31,8 @@ type ChatCompletionRequest struct {
 // ChatCompletionResponse is the minimal response shape NovelClaw needs.
 type ChatCompletionResponse struct {
 	Choices []struct {
-		Message struct {
+		FinishReason string `json:"finish_reason"`
+		Message      struct {
 			Content string `json:"content"`
 		} `json:"message"`
 		Delta struct {
@@ -55,9 +58,14 @@ func NewClient(cfg *config.AppConfig) *Client {
 		httpClient: &http.Client{
 			Timeout: 180 * time.Second,
 			Transport: &http.Transport{
-				MaxIdleConns:        32,
-				MaxIdleConnsPerHost: 8,
-				IdleConnTimeout:     90 * time.Second,
+				Proxy:                 http.ProxyFromEnvironment,
+				DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 120 * time.Second,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          32,
+				MaxIdleConnsPerHost:   8,
+				IdleConnTimeout:       90 * time.Second,
 			},
 		},
 	}
@@ -98,6 +106,10 @@ func (c *Client) CompleteWithFallbackForProvider(ctx context.Context, provider c
 			return out, modelName, nil
 		}
 		lastErr = err
+		var statusErr *ProviderHTTPError
+		if errors.As(err, &statusErr) && statusErr.Status == 401 {
+			return "", "", err
+		}
 		if ctx.Err() != nil {
 			return "", "", lastErr
 		}

@@ -19,3 +19,8 @@ jobs:
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
       - name: Run tests
         run: go test ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Reader and local UX regression tests
+        run: node --test tests/*.test.mjs

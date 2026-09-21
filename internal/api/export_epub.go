@@ -28,6 +28,17 @@ func writeZipEntry(zw *zip.Writer, name, content string) error {
 	return nil
 }
 func buildEPUB(dst io.Writer, slug, novelTitle, author string, chapters []exportChapter) error {
+	return buildEPUBStream(dst, slug, novelTitle, author, func(yield func(exportChapter) error) error {
+		for _, chapter := range chapters {
+			if err := yield(chapter); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func buildEPUBStream(dst io.Writer, slug, novelTitle, author string, stream exportStream) error {
 	zw := zip.NewWriter(dst)
 	closed := false
 	defer func() {
@@ -59,7 +70,9 @@ p { text-indent: 1.5em; margin: 0.8em 0; }`
 		return err
 	}
 
-	for idx, ch := range chapters {
+	var chapters []exportChapter // Navigation retains titles only, never paragraph bodies.
+	err = stream(func(ch exportChapter) error {
+		idx := len(chapters)
 		var paras strings.Builder
 		for _, p := range ch.Paragraphs {
 			fmt.Fprintf(&paras, "    <p>%s</p>\n", html.EscapeString(p))
@@ -73,6 +86,11 @@ p { text-indent: 1.5em; margin: 0.8em 0; }`
 		if err := writeZipEntry(zw, fmt.Sprintf("OEBPS/chapter_%d.xhtml", idx+1), content); err != nil {
 			return err
 		}
+		chapters = append(chapters, exportChapter{ChapterNo: ch.ChapterNo, Title: ch.Title})
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	var manifest, spine strings.Builder
@@ -121,7 +139,7 @@ p { text-indent: 1.5em; margin: 0.8em 0; }`
 	return nil
 }
 
-func serveEPUB(w http.ResponseWriter, r *http.Request, fileName, slug, novelTitle, author string, chapters []exportChapter) error {
+func serveEPUBStream(w http.ResponseWriter, r *http.Request, fileName, slug, novelTitle, author string, stream exportStream) error {
 	tmp, err := os.CreateTemp("", "novelclaw-*.epub")
 	if err != nil {
 		return fmt.Errorf("create EPUB temp file: %w", err)
@@ -130,7 +148,7 @@ func serveEPUB(w http.ResponseWriter, r *http.Request, fileName, slug, novelTitl
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
 	}()
-	if err := buildEPUB(tmp, slug, novelTitle, author, chapters); err != nil {
+	if err := buildEPUBStream(tmp, slug, novelTitle, author, stream); err != nil {
 		return err
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {

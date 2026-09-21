@@ -35,7 +35,6 @@ export function createInitialState() {
       speed: 1.0,
       voice: localStorage.getItem('nc_tts_voice') || 'edge-tts/th-TH-NiwatNeural',
       audioElement: null,
-      audioBlobs: {},
     },
     activeJobQueue: [],
   };

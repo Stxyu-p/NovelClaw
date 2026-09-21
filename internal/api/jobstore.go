@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"novelclaw/internal/model"
@@ -84,7 +85,7 @@ func (h *APIHandler) ResumeInterruptedJobs() {
 			quarantineJobFile(path, fmt.Errorf("invalid JSON: %w", err))
 			continue
 		}
-		if spec.JobID == "" || spec.Request.NovelSlug == "" || spec.Request.StartChapter <= 0 || spec.Request.EndChapter < spec.Request.StartChapter {
+		if spec.JobID == "" || spec.JobID != strings.TrimSuffix(e.Name(), ".json") || safeSlug(spec.JobID) != spec.JobID || spec.Request.NovelSlug == "" || spec.Request.StartChapter <= 0 || spec.Request.EndChapter < spec.Request.StartChapter {
 			quarantineJobFile(path, fmt.Errorf("invalid persisted job fields"))
 			continue
 		}
@@ -98,7 +99,7 @@ func (h *APIHandler) ResumeInterruptedJobs() {
 		h.activeJobs[spec.JobID] = &model.TranslationProgress{
 			JobID:          spec.JobID,
 			NovelSlug:      spec.Request.NovelSlug,
-			TotalChapters:  spec.Request.EndChapter,
+			TotalChapters:  spec.Request.EndChapter - spec.Request.StartChapter + 1,
 			CurrentChapter: spec.Request.StartChapter,
 			Status:         "running",
 			Percentage:     0,

@@ -4,8 +4,13 @@ export function createWorkflowController({
   state, el, api, showToast, openModal, closeModal,
   loadNovels, loadChapters, beginJob,
 }) {
+  let translationSlug = null;
   function triggerQuickTranslate(slug, start, end) {
     if (!slug) return;
+    translationSlug = slug;
+    const novel = state.currentNovel?.slug === slug ? state.currentNovel
+      : (state.novels || []).find(item => item.slug === slug);
+    el.transGenre.value = novel?.genre || '';
     el.transStart.value = start;
     el.transEnd.value = end;
     el.transProgressBox.classList.add('hidden');
@@ -171,7 +176,7 @@ export function createWorkflowController({
       const res = await api('/api/translate', {
         method: 'POST',
         body: JSON.stringify({
-          novelSlug: state.currentSlug,
+          novelSlug: translationSlug || state.currentSlug,
           provider,
           startChapter,
           endChapter,

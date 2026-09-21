@@ -32,6 +32,7 @@ func (s *Store) glossaryMapStrict(slug string) (map[string]string, error) {
 	slug = pathSafeSlug(slug)
 	s.glossaryCacheMu.RLock()
 	cached, ok := s.glossaryCache[slug]
+	generation := s.glossaryGeneration
 	s.glossaryCacheMu.RUnlock()
 	if ok {
 		return cached, nil
@@ -45,7 +46,7 @@ func (s *Store) glossaryMapStrict(slug string) (map[string]string, error) {
 	s.glossaryCacheMu.Lock()
 	if existing, exists := s.glossaryCache[slug]; exists {
 		loaded = existing
-	} else {
+	} else if generation == s.glossaryGeneration {
 		s.glossaryCache[slug] = loaded
 	}
 	s.glossaryCacheMu.Unlock()
@@ -54,6 +55,7 @@ func (s *Store) glossaryMapStrict(slug string) (map[string]string, error) {
 func (s *Store) invalidateGlossaryCache(slug string) {
 	slug = pathSafeSlug(slug)
 	s.glossaryCacheMu.Lock()
+	s.glossaryGeneration++
 	delete(s.glossaryCache, slug)
 	s.glossaryCacheMu.Unlock()
 }

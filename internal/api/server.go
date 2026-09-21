@@ -62,6 +62,7 @@ func SetupRouter(cfg *config.AppConfig, store *storage.Store) (http.Handler, *AP
 	// Actions
 	mux.HandleFunc("POST /api/import", h.Import)
 	mux.HandleFunc("POST /api/translate", h.Translate)
+	mux.HandleFunc("GET /api/jobs", h.ListJobs)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", h.CancelJob)
 	mux.HandleFunc("POST /api/novels/{slug}/glossary/discover", h.DiscoverGlossary)
 	mux.HandleFunc("POST /api/audio/speech", h.GenerateSpeech)
@@ -84,6 +85,10 @@ func SetupRouter(cfg *config.AppConfig, store *storage.Store) (http.Handler, *AP
 	mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// If path doesn't have an extension or is root, serve index.html for SPA routing
 		path := r.URL.Path
+		if path == "/api" || strings.HasPrefix(path, "/api/") {
+			WriteError(w, http.StatusNotFound, "API endpoint not found")
+			return
+		}
 		if path == "/" || !strings.Contains(path, ".") {
 			r.URL.Path = "/"
 		}

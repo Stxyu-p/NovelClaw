@@ -287,6 +287,10 @@ func (h *APIHandler) RepairQualityWithAI(w http.ResponseWriter, r *http.Request)
 	}
 	cleanTitle, titleDiag := translator.SanitizeTextWithDiagnostics(title, gMap)
 	cleanParagraphs, paragraphDiag := translator.SanitizeParagraphsWithDiagnostics(paragraphs, gMap)
+	if titleDiag.RemovedUnknownHanzi+paragraphDiag.RemovedUnknownHanzi > 0 {
+		WriteError(w, http.StatusBadGateway, "คำแปลที่แก้ไขยังมีคำที่แปลไม่ครบ จึงเก็บฉบับเดิมไว้")
+		return
+	}
 	if cleanTitle == "" {
 		cleanTitle = repaired.TranslatedTitle
 	}

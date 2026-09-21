@@ -12,6 +12,7 @@ import { createExportController } from './js/export.js';
 import { createProviderEvents } from './js/provider_events.js';
 import { createReaderController } from './js/reader.js';
 import { createWorkflowController } from './js/workflow.js';
+import { createReadingPosition } from './js/reading_position.js';
 
 /* ==========================================================================
    NovelClaw - Client Application Logic
@@ -24,6 +25,7 @@ import { createWorkflowController } from './js/workflow.js';
   const el = bindDOM();
 
   const api = createAPIClient({ onError: err => showToast(err.message, 'error') });
+  const readingPosition = createReadingPosition({ state, api });
 
   let workflowController = null;
   function triggerQuickTranslate(...args) {
@@ -64,6 +66,8 @@ import { createWorkflowController } from './js/workflow.js';
   const readerController = createReaderController({
     state, el, api, showView, showToast, maxChapterNo,
     openNovelDetail, triggerQuickTranslate, stopTTS,
+    adjacentChapterNo, saveReadingPosition: readingPosition.flush,
+    saveBookmark: readingPosition.saveBookmark,
   });
   const {
     renderReaderParagraphs, cycleReadingMode,
@@ -97,7 +101,7 @@ import { createWorkflowController } from './js/workflow.js';
     bindProviderEvents();
     bindWorkflowEvents();
     bindKeyboardShortcuts();
-    bindScrollTracker();
+    readingPosition.bind();
     bindTouchGestures();
     bindJobEvents();
     initSSE();
@@ -108,6 +112,13 @@ import { createWorkflowController } from './js/workflow.js';
 
   // Views Management
   function showView(viewName) {
+    if (state.currentView === 'reader') {
+      readingPosition.flush();
+      if (viewName !== 'reader') {
+        readerController.cancelPendingLoad();
+        stopTTS();
+      }
+    }
     state.currentView = viewName;
     document.body.classList.toggle('is-reader', viewName === 'reader');
     el.viewLibrary.classList.toggle('hidden', viewName !== 'library');
@@ -148,6 +159,8 @@ import { createWorkflowController } from './js/workflow.js';
     modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     modalEl.setAttribute('role', 'dialog');
     modalEl.setAttribute('aria-modal', 'true');
+    const heading = modalEl.querySelector('h3');
+    if (heading) { heading.id ||= `${modalEl.id}-title`; modalEl.setAttribute('aria-labelledby', heading.id); }
     modalEl.classList.remove('hidden');
     document.body.style.overflow = 'hidden';
     requestAnimationFrame(() => modalEl.querySelector('button, input, select, textarea, [tabindex]:not([tabindex="-1"])')?.focus({ preventScroll: true }));
@@ -236,29 +249,6 @@ import { createWorkflowController } from './js/workflow.js';
 
   // Memory and QA UI live in js/intelligence.js.
 
-  // Debounced Scroll Tracker — saves bookmark to backend + localStorage
-  function bindScrollTracker() {
-    let scrollTimeout = null;
-    window.addEventListener('scroll', () => {
-      if (state.currentView !== 'reader' || !state.currentSlug || !state.currentChapterNo) return;
-      clearTimeout(scrollTimeout);
-      scrollTimeout = setTimeout(() => {
-        const scrollTop = window.scrollY || document.documentElement.scrollTop;
-        const scrollHeight = document.documentElement.scrollHeight - document.documentElement.clientHeight;
-        const pct = scrollHeight > 0 ? (scrollTop / scrollHeight) * 100 : 0;
-
-        // Save to localStorage for instant restore
-        localStorage.setItem(`nc_scroll_${state.currentSlug}_${state.currentChapterNo}`, window.scrollY);
-
-        // Save to backend for cross-device sync
-        api(`/api/novels/${state.currentSlug}/bookmark`, {
-          method: 'POST',
-          body: JSON.stringify({ chapterNo: state.currentChapterNo, scrollPercentage: pct }),
-        }).catch(() => {});
-      }, 1200);
-    }, { passive: true });
-  }
-
   // Keyboard Shortcuts (PC Ergonomics)
   function bindKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
@@ -277,7 +267,8 @@ import { createWorkflowController } from './js/workflow.js';
         }
         return;
       }
-      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
+      if (openDialog || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      if (document.activeElement.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
 
       if (state.currentView === 'reader') {
         if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
@@ -377,15 +368,22 @@ import { createWorkflowController } from './js/workflow.js';
   function bindTouchGestures() {
     let touchStartX = 0;
     let touchStartY = 0;
+    let trackingSwipe = false;
 
     window.addEventListener('touchstart', (e) => {
-      if (state.currentView !== 'reader') return;
+      trackingSwipe = false;
+      if (state.currentView !== 'reader' || e.touches.length !== 1
+        || modalElements().some(modal => !modal.classList.contains('hidden'))
+        || e.target.closest('button, input, textarea, select, a, [contenteditable="true"], .reader-toolbar, .tts-player-bar')) return;
+      trackingSwipe = true;
       touchStartX = e.changedTouches[0].clientX;
       touchStartY = e.changedTouches[0].clientY;
     }, { passive: true });
 
     window.addEventListener('touchend', (e) => {
-      if (state.currentView !== 'reader') return;
+      if (!trackingSwipe || state.currentView !== 'reader') return;
+      trackingSwipe = false;
+      if (window.getSelection()?.toString()) return;
       const deltaX = e.changedTouches[0].clientX - touchStartX;
       const deltaY = e.changedTouches[0].clientY - touchStartY;
 
@@ -402,6 +400,7 @@ import { createWorkflowController } from './js/workflow.js';
         }
       }
     }, { passive: true });
+    window.addEventListener('touchcancel', () => { trackingSwipe = false; }, { passive: true });
   }
 
   // Glossary rendering lives in js/glossary.js.

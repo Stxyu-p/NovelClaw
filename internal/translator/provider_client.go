@@ -17,6 +17,34 @@ import (
 
 const maxProviderResponse = 10 << 20
 
+type ProviderHTTPError struct {
+	Status   int
+	Provider string
+}
+
+func (e *ProviderHTTPError) Error() string {
+	hint := "ผู้ให้บริการตอบกลับผิดพลาด ลองใหม่ภายหลัง"
+	switch e.Status {
+	case 401, 403:
+		hint = "ตรวจ API Key และสิทธิ์ใช้งานของผู้ให้บริการ"
+	case 404:
+		hint = "ตรวจ URL, Protocol และชื่อโมเดลในตั้งค่า"
+	case 429:
+		hint = "ถึงขีดจำกัดการใช้งาน รอสักครู่แล้วลองใหม่"
+	}
+	return fmt.Sprintf("%s (HTTP %d): %s", e.Provider, e.Status, hint)
+}
+func readProviderBody(reader io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, maxProviderResponse+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxProviderResponse {
+		return nil, fmt.Errorf("provider response exceeds 10 MiB")
+	}
+	return body, nil
+}
+
 func providerRoot(base string) string {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	for _, suffix := range []string{"/chat/completions", "/responses", "/messages", "/models"} {
@@ -54,12 +82,12 @@ func (c *Client) FetchModelCatalogFor(ctx context.Context, providerID string) ([
 		return nil, fmt.Errorf("%s models request failed: %w", provider.Name, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxProviderResponse))
+	body, err := readProviderBody(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s models API returned %d: %s", provider.Name, resp.StatusCode, compactBody(body))
+		return nil, &ProviderHTTPError{Status: resp.StatusCode, Provider: provider.Name}
 	}
 	var raw struct {
 		Data []struct {
@@ -196,8 +224,11 @@ func compactBody(body []byte) string {
 func retryDelay(resp *http.Response, attempt int) time.Duration {
 	if resp != nil {
 		if value := strings.TrimSpace(resp.Header.Get("Retry-After")); value != "" {
-			if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 && seconds <= 60 {
-				return time.Duration(seconds) * time.Second
+			if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+				return time.Duration(min(seconds, 60)) * time.Second
+			}
+			if date, err := http.ParseTime(value); err == nil {
+				return min(max(time.Until(date), 0), 60*time.Second)
 			}
 		}
 	}
@@ -234,14 +265,20 @@ func (c *Client) doProviderJSON(ctx context.Context, provider config.ActiveProvi
 			if attempt < 3 && waitRetry(ctx, retryDelay(nil, attempt)) == nil {
 				continue
 			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, lastErr
 		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxProviderResponse))
+		body, readErr := readProviderBody(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
 			lastErr = readErr
 			if attempt < 3 && waitRetry(ctx, retryDelay(resp, attempt)) == nil {
 				continue
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
 			return nil, lastErr
 		}
@@ -249,11 +286,14 @@ func (c *Client) doProviderJSON(ctx context.Context, provider config.ActiveProvi
 			return body, nil
 		}
 
-		lastErr = fmt.Errorf("%s error (HTTP %d): %s", provider.Name, resp.StatusCode, compactBody(body))
+		lastErr = &ProviderHTTPError{Status: resp.StatusCode, Provider: provider.Name}
 		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) && attempt < 3 {
 			if err := waitRetry(ctx, retryDelay(resp, attempt)); err == nil {
 				continue
 			}
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 		return nil, lastErr
 	}
@@ -286,6 +326,9 @@ func (c *Client) completeOpenAIChat(ctx context.Context, provider config.ActiveP
 	if len(response.Choices) == 0 {
 		return "", fmt.Errorf("%s returned no completion choices", provider.Name)
 	}
+	if reason := response.Choices[0].FinishReason; reason != "" && reason != "stop" {
+		return "", fmt.Errorf("%s: คำตอบยังไม่สมบูรณ์ (%s) ลองเพิ่มจำนวน token หรือเปลี่ยนโมเดล", provider.Name, reason)
+	}
 	text := strings.TrimSpace(response.Choices[0].Message.Content)
 	if text == "" {
 		return "", fmt.Errorf("%s returned an empty completion", provider.Name)
@@ -312,6 +355,7 @@ func (c *Client) completeOpenAIResponses(ctx context.Context, provider config.Ac
 }
 func parseResponsesText(providerName string, body []byte) (string, error) {
 	var response struct {
+		Status     string `json:"status"`
 		OutputText string `json:"output_text"`
 		Output     []struct {
 			Type    string `json:"type"`
@@ -329,6 +373,9 @@ func parseResponsesText(providerName string, body []byte) (string, error) {
 	}
 	if response.Error != nil {
 		return "", fmt.Errorf("%s API error: %s", providerName, response.Error.Message)
+	}
+	if response.Status != "" && response.Status != "completed" {
+		return "", fmt.Errorf("%s: คำตอบยังไม่สมบูรณ์ (%s)", providerName, response.Status)
 	}
 	if text := strings.TrimSpace(response.OutputText); text != "" {
 		return text, nil
@@ -362,7 +409,8 @@ func (c *Client) completeAnthropic(ctx context.Context, provider config.ActivePr
 		return "", err
 	}
 	var response struct {
-		Content []struct {
+		StopReason string `json:"stop_reason"`
+		Content    []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
@@ -377,6 +425,9 @@ func (c *Client) completeAnthropic(ctx context.Context, provider config.ActivePr
 		return "", fmt.Errorf("%s API error: %s", provider.Name, response.Error.Message)
 	}
 	var out strings.Builder
+	if reason := response.StopReason; reason != "" && reason != "end_turn" && reason != "stop_sequence" {
+		return "", fmt.Errorf("%s: คำตอบยังไม่สมบูรณ์ (%s)", provider.Name, reason)
+	}
 	for _, block := range response.Content {
 		if block.Type == "text" {
 			out.WriteString(block.Text)

@@ -9,13 +9,41 @@ export function createJobController({
   let progressHideTimer = null;
   let source = null;
   let bound = false;
+  let snapshotVersion = 0;
+
+  async function syncJobs() {
+    const version = ++snapshotVersion;
+    const expected = state.currentJobId;
+    try {
+      const res = await api('/api/jobs', { silent: true });
+      if (version !== snapshotVersion || state.currentJobId !== expected) return;
+      const jobs = res.jobs || [];
+      const job = jobs.find(item => item.jobId === expected) || jobs[0];
+      if (!job) {
+        if (expected) {
+          finishJob();
+          el.topProgressBar?.classList.add('hidden');
+          el.floatingJobBar?.classList.add('hidden');
+          if (state.currentSlug) scheduleLoadChapters(state.currentSlug);
+          loadNovels();
+        }
+        return;
+      }
+      const kind = job.jobId.startsWith('import_') ? 'import' : 'translation';
+      if (state.currentJobId !== job.jobId) beginJob(job.jobId, kind);
+      setRunningProgress(job);
+    } catch (err) { console.warn('restore job progress failed', err); }
+  }
 
   function scheduleLoadChapters(slug) {
     clearTimeout(tocRefreshTimer);
-    tocRefreshTimer = setTimeout(() => loadChapters(slug), 2000);
+    tocRefreshTimer = setTimeout(() => {
+      if (state.currentSlug === slug) loadChapters(slug);
+    }, 2000);
   }
 
   function beginJob(jobID, kind = 'translation') {
+    snapshotVersion++;
     clearTimeout(progressHideTimer);
     progressHideTimer = null;
     state.currentJobId = jobID;
@@ -25,13 +53,14 @@ export function createJobController({
   }
 
   function finishJob() {
+    snapshotVersion++;
     state.currentJobId = null;
     state.currentJobKind = null;
   }
 
   function upsertQueue(chapterNo, patch) {
     if (!chapterNo) return;
-    let item = state.activeJobQueue.find(entry => entry.chapterNo === chapterNo);
+    let item = state.activeJobQueue.find(entry => entry.chapterNo === chapterNo && entry.novelSlug === patch.novelSlug);
     if (!item) {
       item = { chapterNo };
       state.activeJobQueue.push(item);
@@ -71,12 +100,14 @@ export function createJobController({
   }
 
   function handleChapterTranslated(data) {
-    showToast(`แปล ${data.title} เสร็จเรียบร้อยแล้ว ✨`, 'success');
+    if (state.currentView !== 'reader' || (state.currentSlug === data.novelSlug && state.currentChapterNo === data.chapterNo)) {
+      showToast(`แปล ${data.title} เสร็จเรียบร้อยแล้ว ✨`, 'success');
+    }
     if (Array.isArray(data.warnings) && data.warnings.length) {
       const suffix = data.warnings.length > 1 ? ` (+${data.warnings.length - 1} จุด)` : '';
       showToast(`⚠️ ${data.warnings[0]}${suffix}`, 'warning');
     }
-    if (typeof data.qaScore === 'number') {
+    if (state.currentSlug === data.novelSlug && typeof data.qaScore === 'number') {
       const report = {
         chapterNo: data.chapterNo,
         score: data.qaScore,
@@ -87,7 +118,7 @@ export function createJobController({
       else state.qaReports.push(report);
       if (el.modalIntelligence && !el.modalIntelligence.classList.contains('hidden')) renderQASummary();
     }
-    upsertQueue(data.chapterNo, { status: 'done', title: data.title });
+    upsertQueue(data.chapterNo, { status: 'done', title: data.title, novelSlug: data.novelSlug });
     if (state.currentSlug === data.novelSlug) {
       scheduleLoadChapters(state.currentSlug);
       if (state.currentView === 'reader' && state.currentChapterNo === data.chapterNo) {
@@ -97,6 +128,7 @@ export function createJobController({
   }
 
   function handleFinalStatus(data) {
+    if (data.jobId && state.currentJobId && data.jobId !== state.currentJobId) return;
     finishJob();
     if (data.status === 'partial') {
       showToast(data.message || 'การแปลเสร็จบางส่วน — มีบางตอนที่ต้องตรวจสอบ', 'warning');
@@ -132,6 +164,7 @@ export function createJobController({
       hideProgressAfter(5000);
     }
     if (state.currentSlug === data.novelSlug) scheduleLoadChapters(state.currentSlug);
+    void syncJobs();
   }
 
   function handleImportProgress(data) {
@@ -149,6 +182,11 @@ export function createJobController({
   }
 
   function handleImportFinal(data, kind) {
+    if (data.jobId && state.currentJobId && data.jobId !== state.currentJobId) {
+      loadNovels();
+      if (state.currentSlug === data.novelSlug) loadChapters(state.currentSlug);
+      return;
+    }
     finishJob();
     if (kind === 'partial') {
       showToast(data.message || 'นำเข้าเสร็จบางส่วน', 'warning');
@@ -168,9 +206,12 @@ export function createJobController({
     hideProgressAfter(kind === 'partial' || kind === 'error' ? 5000 : 2500);
     loadNovels();
     if (state.currentSlug === data.novelSlug) loadChapters(state.currentSlug);
+    void syncJobs();
   }
 
   function handleSSEEvent(data) {
+    snapshotVersion++;
+    if (data.type === 'connected') { el.connectionStatus?.classList.add('hidden'); void syncJobs(); return; }
     if (data.type === 'auto_intelligence') {
       showToast(data.message || 'AI อัปเดตข้อมูลอัตโนมัติแล้ว', 'success');
       return;
@@ -202,7 +243,7 @@ export function createJobController({
     if (data.status === 'running') {
       state.currentJobId = data.jobId;
       state.currentJobKind = 'translation';
-      upsertQueue(data.currentChapter, { status: 'running', message: data.message });
+      upsertQueue(data.currentChapter, { status: 'running', message: data.message, novelSlug: data.novelSlug });
       setRunningProgress(data);
       return;
     }
@@ -214,6 +255,7 @@ export function createJobController({
       showToast(data.message, 'error');
       upsertQueue(data.currentChapter, {
         status: 'error',
+        novelSlug: data.novelSlug,
         error: data.errorDetails || data.message,
       });
       el.transProgressBox?.classList.remove('hidden');
@@ -230,11 +272,13 @@ export function createJobController({
       return;
     }
     if (data.status === 'cancelled') {
+      if (data.jobId && state.currentJobId && data.jobId !== state.currentJobId) return;
       const kind = state.currentJobKind;
       finishJob();
       showToast(kind === 'import' ? 'ยกเลิกการนำเข้าแล้ว' : 'ยกเลิกคิวการแปลแล้ว', 'info');
       el.topProgressBar?.classList.add('hidden');
       el.floatingJobBar?.classList.add('hidden');
+      void syncJobs();
     }
   }
 
@@ -248,7 +292,10 @@ export function createJobController({
         console.error('SSE JSON error', err);
       }
     };
-    source.onerror = () => console.warn('SSE connection interrupted; browser will retry');
+    source.onerror = () => {
+      el.connectionStatus?.classList.remove('hidden');
+      console.warn('SSE connection interrupted; browser will retry');
+    };
     window.addEventListener('beforeunload', () => source?.close(), { once: true });
   }
 
@@ -281,7 +328,7 @@ export function createJobController({
         </div>
         <div style="display:flex;align-items:center;gap:.5rem;">
           <span class="queue-badge ${item.status}">${item.status === 'done' ? '✅ เสร็จแล้ว' : item.status === 'running' ? '🔄 กำลังแปล' : item.status === 'error' ? '❌ ล้มเหลว' : '⏳ รอคิว'}</span>
-          ${item.status === 'error' ? `<button class="btn btn-outline btn-sm btn-retry-ch" data-ch="${item.chapterNo}">🔄 แปลซ้ำ</button>` : ''}
+          ${item.status === 'error' ? `<button class="btn btn-outline btn-sm btn-retry-ch" data-ch="${item.chapterNo}" data-slug="${escapeHTML(item.novelSlug || '')}">🔄 แปลซ้ำ</button>` : ''}
         </div>
       </div>
     `).join('');
@@ -302,7 +349,8 @@ export function createJobController({
       if (!button) return;
       const chapterNo = Number.parseInt(button.dataset.ch, 10);
       if (!Number.isFinite(chapterNo)) return;
-      triggerQuickTranslate(state.currentSlug, chapterNo, chapterNo);
+      if (!button.dataset.slug) return;
+      triggerQuickTranslate(button.dataset.slug, chapterNo, chapterNo);
       closeModal(el.modalQueue);
     });
   }

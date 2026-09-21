@@ -1,25 +1,34 @@
 package api
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"novelclaw/internal/storage"
+	"os"
 	"strings"
 	"time"
-
-	"novelclaw/internal/storage"
 )
 
-// ExportNovel exports translated chapters in TXT, Markdown, or EPUB format
+type exportStream func(func(exportChapter) error) error
+
+var errNoExportChapters = errors.New("No translated chapters found in the specified range")
+
+// ExportNovel loads one chapter at a time. Temporary output keeps failures
+// atomic for the download without retaining an entire novel in RAM.
 func (h *APIHandler) ExportNovel(w http.ResponseWriter, r *http.Request) {
 	slug := safeSlug(r.PathValue("slug"))
-	format := r.URL.Query().Get("format")
+	format := strings.ToLower(r.URL.Query().Get("format"))
 	if format == "" {
 		format = "txt"
 	}
-	format = strings.ToLower(format)
-
+	if format != "txt" && format != "md" && format != "markdown" && format != "epub" {
+		WriteError(w, http.StatusBadRequest, "Unsupported export format. Use txt, markdown, or epub")
+		return
+	}
 	novel, err := h.store.GetNovel(slug)
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -29,147 +38,148 @@ func (h *APIHandler) ExportNovel(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, status, err.Error())
 		return
 	}
-
 	chapters, err := h.store.ListChapters(slug)
 	if err != nil {
-		WriteError(w, http.StatusInternalServerError, err.Error())
+		WriteError(w, 500, err.Error())
 		return
 	}
 	if len(chapters) == 0 {
-		WriteError(w, http.StatusNotFound, "No chapters found to export")
+		WriteError(w, 404, "No chapters found to export")
 		return
 	}
-
-	// Chapter numbers can have gaps (e.g. 1..72 then 86..88), so bound the
-	// range by real chapter numbers, not by the slice length.
-	maxChNo := chapters[len(chapters)-1].ChapterNo
-
-	startNo, err := positiveQueryInt(r, "start", 1)
+	maxNo := chapters[len(chapters)-1].ChapterNo
+	start, err := positiveQueryInt(r, "start", 1)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, err.Error())
+		WriteError(w, 400, err.Error())
 		return
 	}
-	endNo, err := positiveQueryInt(r, "end", maxChNo)
+	end, err := positiveQueryInt(r, "end", maxNo)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, err.Error())
+		WriteError(w, 400, err.Error())
 		return
 	}
-	if startNo > endNo {
-		WriteError(w, http.StatusBadRequest, "end must be greater than or equal to start")
+	if start > end || end > maxNo {
+		WriteError(w, 400, "Invalid export chapter range")
 		return
 	}
-	if endNo > maxChNo {
-		WriteError(w, http.StatusBadRequest, fmt.Sprintf("end exceeds highest chapter number %d", maxChNo))
-		return
-	}
-
-	// Fetch full content of all translated chapters in range.
-	var exportList []exportChapter
-
-	for _, meta := range chapters {
-		chNo := meta.ChapterNo
-		if chNo < startNo || chNo > endNo {
-			continue
-		}
-		content, err := h.store.GetChapter(slug, chNo)
-		if err != nil {
+	stream := exportStream(func(yield func(exportChapter) error) error {
+		count := 0
+		for _, meta := range chapters {
+			if err := r.Context().Err(); err != nil {
+				return err
+			}
+			if meta.ChapterNo < start || meta.ChapterNo > end || !meta.HasTranslated {
+				continue
+			}
+			content, err := h.store.GetChapter(slug, meta.ChapterNo)
 			if errors.Is(err, storage.ErrChapterNotFound) {
 				continue
 			}
-			WriteError(w, http.StatusInternalServerError, err.Error())
-			return
+			if err != nil {
+				return err
+			}
+			if len(content.TranslatedText) == 0 {
+				continue
+			}
+			title := content.TranslatedTitle
+			if title == "" {
+				title = fmt.Sprintf("ตอนที่ %d", meta.ChapterNo)
+			}
+			if err := yield(exportChapter{ChapterNo: meta.ChapterNo, Title: title, Paragraphs: content.TranslatedText}); err != nil {
+				return err
+			}
+			count++
 		}
-		if len(content.TranslatedText) == 0 {
-			continue
+		if count == 0 {
+			return errNoExportChapters
 		}
-		title := content.TranslatedTitle
-		if title == "" {
-			title = fmt.Sprintf("ตอนที่ %d", chNo)
+		return nil
+	})
+	title := novel.TranslatedTitle
+	if title == "" {
+		title = novel.Title
+	}
+	if title == "" {
+		title = slug
+	}
+	filename := sanitizeSlug(title)
+	if filename == "" {
+		filename = "novel"
+	}
+	filename = fmt.Sprintf("%s_ch%d-%d", filename, start, end)
+	if format == "epub" {
+		err = serveEPUBStream(w, r, filename+".epub", slug, title, novel.Author, stream)
+	} else {
+		err = serveTextExport(w, r, filename, title, novel.Author, format, start, end, stream)
+	}
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errNoExportChapters) {
+			status = http.StatusBadRequest
 		}
-		exportList = append(exportList, exportChapter{
-			ChapterNo:  chNo,
-			Title:      title,
-			Paragraphs: content.TranslatedText,
-		})
+		WriteError(w, status, err.Error())
 	}
+}
 
-	if len(exportList) == 0 {
-		WriteError(w, http.StatusBadRequest, "No translated chapters found in the specified range")
-		return
+func serveTextExport(w http.ResponseWriter, r *http.Request, filename, title, author, format string, start, end int, stream exportStream) error {
+	tmp, err := os.CreateTemp("", "novelclaw-export-*.tmp")
+	if err != nil {
+		return err
 	}
-
-	novelTitle := novel.TranslatedTitle
-	if novelTitle == "" {
-		novelTitle = novel.Title
+	defer func() { tmp.Close(); os.Remove(tmp.Name()) }()
+	body := bufio.NewWriterSize(tmp, 32*1024)
+	count := 0
+	err = stream(func(ch exportChapter) error {
+		if format == "txt" {
+			fmt.Fprintf(body, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n %s\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n", ch.Title)
+			for _, p := range ch.Paragraphs {
+				fmt.Fprintf(body, "  %s\n\n", p)
+			}
+			fmt.Fprint(body, "\n\n")
+		} else {
+			fmt.Fprintf(body, "## %s\n\n", ch.Title)
+			for _, p := range ch.Paragraphs {
+				fmt.Fprintf(body, "%s\n\n", p)
+			}
+			fmt.Fprint(body, "\n---\n\n")
+		}
+		count++
+		return body.Flush()
+	})
+	if err != nil {
+		return err
 	}
-	if novelTitle == "" {
-		novelTitle = slug
+	if _, err = tmp.Seek(0, io.SeekStart); err != nil {
+		return err
 	}
-
-	safeFileName := sanitizeSlug(novelTitle)
-	if safeFileName == "" {
-		safeFileName = "novel"
+	info, err := tmp.Stat()
+	if err != nil {
+		return err
 	}
-
-	switch format {
-	case "txt":
+	var header strings.Builder
+	if format == "txt" {
+		header.WriteString("\xef\xbb\xbf====================================================\n")
+		fmt.Fprintf(&header, " ชื่อเรื่อง: %s\n", title)
+		if author != "" {
+			fmt.Fprintf(&header, " ผู้แต่ง: %s\n", author)
+		}
+		fmt.Fprintf(&header, " ตอนที่: %d - %d (รวม %d ตอน)\n ส่งออกเมื่อ: %s\n แปลและจัดทำโดย: NovelClaw AI\n====================================================\n\n\n", start, end, count, time.Now().Format("02/01/2006 15:04:05"))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s_ch%d-%d.txt"`, safeFileName, startNo, endNo))
-
-		var b strings.Builder
-		b.WriteString("====================================================\n")
-		b.WriteString(fmt.Sprintf(" ชื่อเรื่อง: %s\n", novelTitle))
-		if novel.Author != "" {
-			b.WriteString(fmt.Sprintf(" ผู้แต่ง: %s\n", novel.Author))
+		filename += ".txt"
+	} else {
+		fmt.Fprintf(&header, "# %s\n\n", title)
+		if author != "" {
+			fmt.Fprintf(&header, "**ผู้แต่ง**: %s  \n", author)
 		}
-		b.WriteString(fmt.Sprintf(" ตอนที่: %d - %d (รวม %d ตอน)\n", startNo, endNo, len(exportList)))
-		b.WriteString(fmt.Sprintf(" ส่งออกเมื่อ: %s\n", time.Now().Format("02/01/2006 15:04:05")))
-		b.WriteString(" แปลและจัดทำโดย: NovelClaw AI\n")
-		b.WriteString("====================================================\n\n\n")
-
-		for _, ch := range exportList {
-			b.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-			b.WriteString(fmt.Sprintf(" %s\n", ch.Title))
-			b.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
-			for _, p := range ch.Paragraphs {
-				b.WriteString("  " + p + "\n\n")
-			}
-			b.WriteString("\n\n")
-		}
-		payload := append([]byte{0xEF, 0xBB, 0xBF}, []byte(b.String())...)
-		if _, err := w.Write(payload); err != nil {
-			log.Printf("TXT export write failed for %s: %v", slug, err)
-		}
-
-	case "md", "markdown":
+		fmt.Fprintf(&header, "**จำนวนตอน**: %d - %d  \n**วันที่ส่งออก**: %s  \n\n---\n\n", start, end, time.Now().Format("02/01/2006 15:04"))
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s_ch%d-%d.md"`, safeFileName, startNo, endNo))
-
-		var b strings.Builder
-		b.WriteString(fmt.Sprintf("# %s\n\n", novelTitle))
-		if novel.Author != "" {
-			b.WriteString(fmt.Sprintf("**ผู้แต่ง**: %s  \n", novel.Author))
-		}
-		b.WriteString(fmt.Sprintf("**จำนวนตอน**: %d - %d  \n", startNo, endNo))
-		b.WriteString(fmt.Sprintf("**วันที่ส่งออก**: %s  \n\n---\n\n", time.Now().Format("02/01/2006 15:04")))
-
-		for _, ch := range exportList {
-			b.WriteString(fmt.Sprintf("## %s\n\n", ch.Title))
-			for _, p := range ch.Paragraphs {
-				b.WriteString(p + "\n\n")
-			}
-			b.WriteString("\n---\n\n")
-		}
-		if _, err := w.Write([]byte(b.String())); err != nil {
-			log.Printf("Markdown export write failed for %s: %v", slug, err)
-		}
-
-	case "epub":
-		fileName := fmt.Sprintf("%s_ch%d-%d.epub", safeFileName, startNo, endNo)
-		if err := serveEPUB(w, r, fileName, slug, novelTitle, novel.Author, exportList); err != nil {
-			WriteError(w, http.StatusInternalServerError, fmt.Sprintf("EPUB export failed: %v", err))
-		}
-	default:
-		WriteError(w, http.StatusBadRequest, "Unsupported export format. Use txt, markdown, or epub")
+		filename += ".md"
 	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	w.Header().Set("Content-Length", fmt.Sprint(int64(header.Len())+info.Size()))
+	if _, err := io.Copy(w, io.MultiReader(strings.NewReader(header.String()), tmp)); err != nil {
+		// Headers have been committed; never append JSON to a partial download.
+		log.Printf("export download interrupted: %v", err)
+	}
+	return nil
 }
