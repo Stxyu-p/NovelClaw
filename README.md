@@ -8,6 +8,7 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev/)
 [![Release](https://img.shields.io/badge/Release-v1.0.0-10b981?style=for-the-badge)](https://github.com/Stxyu-p/NovelClaw/releases)
+[![Changelog](https://img.shields.io/badge/Changelog-View_Notes-blueviolet?style=for-the-badge)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b?style=for-the-badge)](LICENSE)
 [![Language: TH](https://img.shields.io/badge/Language-%E0%B8%A0%E0%B8%B2%E0%B8%A9%E0%B8%B2%E0%B9%84%E0%B8%97%E0%B8%A2-blue?style=for-the-badge)](#-ภาษาไทย-thai-overview)
 
@@ -168,6 +169,12 @@ NovelClaw คือระบบ **Local-first** สำหรับนำเข�
 - รวมทุกอย่างไว้ในไฟล์เดียว (`novelclaw.exe`) ไม่ต้องติดตั้ง Node.js หรือ Database
 - มีระบบ **Glossary** บันทึกชื่อตัวละคร/วิชา/สถานที่ และ **Context Memory** ช่วยให้สำนวนไทยสละสลวยคงเส้นคงวา
 - โหมดอ่านหนังสือแบบ OLED Dark, Sepia, และ Light พร้อมระบบบันทึกตอนที่อ่านค้างไว้อัตโนมัติ
+
+---
+
+## 📜 Release History & Changelog
+
+All version release notes and historical changes are documented in [CHANGELOG.md](CHANGELOG.md) per Keep a Changelog standards.
 
 ---
 
