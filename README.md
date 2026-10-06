@@ -4,7 +4,7 @@
 
 **Single-Binary Web Novel Importer, AI-Assisted Translation Engine & Distraction-Free Reader**
 
-*Written in Go · Zero External Dependencies · Local-First Architecture · Embedded OLED Web Reader*
+*Written in Go, Zero External Dependencies, Local-First Architecture, Embedded OLED Web Reader*
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev/)
 [![Release](https://img.shields.io/badge/Release-v1.0.0-10b981?style=for-the-badge)](https://github.com/Stxyu-p/NovelClaw/releases)
@@ -59,6 +59,19 @@ flowchart LR
 | ⚡ **Live SSE Streaming** | Translation jobs stream status and paragraph diffs in real-time over Server-Sent Events (`/api/events`). | Zero client-side polling timer; instant reconnection recovery. |
 | 📖 **Distraction-Free Reader** | Built-in web reader featuring OLED Dark, Sepia, and Light modes with font size and layout controls. | Fully responsive across desktop browsers and mobile devices on local LAN. |
 | 📚 **Universal Export** | Export any novel or chapter range into structured EPUB, Markdown, or raw TXT. | Streaming temporary-file generation prevents memory bloat on large 1,000+ chapter books. |
+
+---
+
+## 📊 Feature Comparison
+
+| Capability | Typical online readers and cloud tools | NovelClaw |
+| :--- | :--- | :--- |
+| **Delivery** | Runtime, database, or account setup required | ✅ **Single binary, double click to run** |
+| **Storage** | Chapters live on a remote account | ✅ **Local files, offline by default** |
+| **Translation consistency** | Generic machine output per chunk | ✅ **Glossary plus rolling context memory** |
+| **Reading experience** | Needs a network connection | ✅ **OLED reader on local LAN for phones and tablets** |
+| **Export** | Locked format or copy paste | ✅ **Streaming EPUB, Markdown, and TXT** |
+| **Dependencies** | Node.js, Python, Docker, or SQL | ✅ **Zero external dependencies** |
 
 ---
 
