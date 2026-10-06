@@ -90,23 +90,18 @@ flowchart LR
 
 ## 🛠️ Quick Start
 
-### 1. Run the Single Binary
-Download the pre-built executable and run:
-
 ```powershell
+# Launch standalone binary (binds to http://localhost:4890)
 .\novelclaw.exe
-```
 
-Or specify custom options via CLI flags:
-
-```powershell
+# Or specify custom translation backend and network flags
 .\novelclaw.exe -port 4890 -router "http://localhost:20128/v1" -model "google/gemini-2.5-flash"
 ```
 
-### 2. Access the Reader
-Open your web browser at:
-- **Local Machine:** `http://localhost:4890`
-- **Mobile on Same WiFi / LAN:** `http://[YOUR-PC-LOCAL-IP]:4890`
+| Access Target | Endpoint URL | Context |
+| :--- | :--- | :--- |
+| **Local Desktop** | `http://localhost:4890` | Auto-launches in your primary browser |
+| **LAN Mobile Reader** | `http://[LOCAL-IP]:4890` | Distraction-free OLED reading across your local WiFi |
 
 ---
 
@@ -147,17 +142,17 @@ NovelClaw/
 All tests run locally to certify data integrity, streaming performance, and UI responsiveness:
 
 ```powershell
-# 1. Run all Go package tests
+# Run all Go package tests
 go test ./...
 
-# 2. Race condition checks for storage and API engines
+# Race condition checks for storage and API engines
 go test -race ./internal/storage ./internal/api
 
-# 3. Micro-benchmarks for reader decode and export streaming
+# Micro-benchmarks for reader decode and export streaming
 go test ./internal/storage -run '^$' -bench BenchmarkReaderDecode -benchmem -count 3
 go test ./internal/api -run '^$' -bench BenchmarkExport -benchmem -count 3
 
-# 4. Browser smoke tests (Playwright)
+# Browser smoke tests (Playwright)
 node tests/browser-smoke.cjs
 ```
 
